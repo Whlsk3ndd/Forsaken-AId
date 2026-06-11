@@ -6,15 +6,14 @@
     ██║     ██║  ██║██║  ██║██████╔╝ ╚████╔╝ ██║  ██║██║ ╚████║╚██████╗███████╗██████╔╝
     ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝   ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═════╝ 
     
-    LOBBY/DEAD DETECTION: AI ONLY RUNS WHEN ALIVE AND IN MATCH
-    HIDE + CLOSE buttons | XENO READY | WALL AVOIDANCE
+    FIXED: Generator hold interaction | Real infinite sprint | Blur removal | Killer flee
 --]]
 
 -- // SERVICES // --
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
 local LP = Players.LocalPlayer
 
 -- // STATE // --
@@ -23,7 +22,7 @@ local AISliderValue = 40
 local MovingToTarget = false
 local Fleeing = false
 local ScriptActive = true
-local WasAliveLastCheck = false   -- to avoid spamming status changes
+local OriginalWalkSpeed = 16  -- will be set later
 
 -- // REFERENCES // --
 local PlayerChar, Humanoid, RootPart
@@ -46,46 +45,88 @@ local function updateChar()
     if PlayerChar then
         Humanoid = PlayerChar:FindFirstChildOfClass("Humanoid")
         RootPart = PlayerChar:FindFirstChild("HumanoidRootPart")
+        if Humanoid and OriginalWalkSpeed == 16 then
+            OriginalWalkSpeed = Humanoid.WalkSpeed
+        end
     else
         Humanoid = nil
         RootPart = nil
     end
 end
 
--- // LOBBY/DEAD DETECTION (returns true if player is alive and in a match) // --
-local function isPlayerAliveAndInMatch()
-    -- 1. No character → dead or not spawned
-    if not PlayerChar or not Humanoid then
-        return false
-    end
-    -- 2. Health check
-    if Humanoid.Health <= 0 then
-        return false
-    end
-    -- 3. Detect lobby by checking for a "Lobby" part (common in Forsaken)
-    --    If a part named "Lobby" exists and player is near it or game state says lobby.
-    local lobbyPart = workspace:FindFirstChild("Lobby") or workspace:FindFirstChild("LobbyArea")
-    if lobbyPart and RootPart then
-        local distToLobby = (RootPart.Position - lobbyPart.Position).magnitude
-        if distToLobby < 100 then  -- if player is near lobby area, consider it lobby
-            return false
+-- // REMOVE BLUR EFFECTS (stamina blur) // --
+local function removeBlurEffects()
+    -- Disable all BlurEffect in Lighting
+    for _, effect in pairs(Lighting:GetChildren()) do
+        if effect:IsA("BlurEffect") then
+            effect.Enabled = false
         end
     end
-    -- 4. Check for a GUI that indicates lobby (common in many games)
-    local playerGui = LP:FindFirstChild("PlayerGui")
-    if playerGui then
-        -- Look for a screen named "LobbyScreen" or "MainMenu"
-        for _, gui in pairs(playerGui:GetChildren()) do
-            if gui:IsA("ScreenGui") and (gui.Name:lower():find("lobby") or gui.Name:lower():find("menu") or gui.Name:lower():find("waiting")) then
-                -- If such a GUI is visible, likely in lobby
-                if gui.Enabled then
-                    return false
-                end
+    -- Also check the player's camera (some games attach blur there)
+    local camera = workspace.CurrentCamera
+    if camera then
+        for _, effect in pairs(camera:GetChildren()) do
+            if effect:IsA("BlurEffect") then
+                effect.Enabled = false
             end
         end
     end
-    -- 5. Fallback: if there are no generators detected but the game is supposed to have them, maybe not in match.
-    --    But we'll let the AI loop handle that (it will just do nothing until generators appear).
+    -- Check for PostProcessing effects
+    for _, effect in pairs(Lighting:GetChildren()) do
+        if effect:IsA("BloomEffect") or effect:IsA("ColorCorrectionEffect") then
+            -- optional: you can disable these too if they cause blur-like effect
+        end
+    end
+end
+
+-- // REAL INFINITE SPRINT (speed + animation + no blur) // --
+local function applyInfiniteStamina()
+    if not Humanoid then return end
+    -- Force walk speed to max (typically 24 for sprint)
+    local maxSpeed = 24
+    if Humanoid.WalkSpeed < maxSpeed then
+        Humanoid.WalkSpeed = maxSpeed
+    end
+    -- Override stamina value if exists
+    local staminaProp = Humanoid:FindFirstChild("Stamina")
+    if staminaProp and staminaProp:IsA("NumberValue") then
+        setreadonly(staminaProp, false)
+        staminaProp.Value = 100
+        setreadonly(staminaProp, true)
+    end
+    -- Force sprint attribute (if game uses it)
+    if Humanoid:GetAttribute("Sprinting") ~= true then
+        Humanoid:SetAttribute("Sprinting", true)
+    end
+    -- Some games use a bool value in the character
+    local sprintBool = PlayerChar:FindFirstChild("IsSprinting")
+    if sprintBool and sprintBool:IsA("BoolValue") then
+        sprintBool.Value = true
+    end
+    -- Remove blur every frame to be sure
+    removeBlurEffects()
+end
+
+-- // LOBBY/DEAD DETECTION // --
+local function isPlayerAliveAndInMatch()
+    if not PlayerChar or not Humanoid then return false end
+    if Humanoid.Health <= 0 then return false end
+    -- Check for lobby parts
+    local lobbyPart = workspace:FindFirstChild("Lobby") or workspace:FindFirstChild("LobbyArea")
+    if lobbyPart and RootPart then
+        if (RootPart.Position - lobbyPart.Position).magnitude < 100 then
+            return false
+        end
+    end
+    -- Check for lobby GUI
+    local playerGui = LP:FindFirstChild("PlayerGui")
+    if playerGui then
+        for _, gui in pairs(playerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and (gui.Name:lower():find("lobby") or gui.Name:lower():find("menu")) then
+                if gui.Enabled then return false end
+            end
+        end
+    end
     return true
 end
 
@@ -113,30 +154,44 @@ local function findKiller()
     return nil
 end
 
--- // SMART FLEE POSITION // --
+-- // SMART FLEE (with fallback) // --
 local function getFleePosition(killerPos, myPos)
     local direction = (myPos - killerPos).unit
-    for angle = 0, 360, 45 do
+    local fleeDist = 50
+    -- Try straight back first
+    local fleePos = myPos + direction * fleeDist
+    fleePos = Vector3.new(math.clamp(fleePos.X, -500, 500), fleePos.Y, math.clamp(fleePos.Z, -500, 500))
+    
+    -- Quick path check
+    local testPath = PathfindingService:CreatePath(PATH_OPTIONS)
+    local success = pcall(function()
+        testPath:ComputeAsync(myPos, fleePos)
+    end)
+    if success and testPath.Status == Enum.PathStatus.Success then
+        return fleePos
+    end
+    
+    -- Fallback: try multiple angles
+    for angle = 45, 315, 45 do
         local rad = math.rad(angle)
         local testDir = Vector3.new(
             direction.X * math.cos(rad) - direction.Z * math.sin(rad),
             0,
             direction.X * math.sin(rad) + direction.Z * math.cos(rad)
         ).unit
-        local fleePos = myPos + testDir * 40
-        fleePos = Vector3.new(math.clamp(fleePos.X, -500, 500), fleePos.Y, math.clamp(fleePos.Z, -500, 500))
-        local testPath = PathfindingService:CreatePath(PATH_OPTIONS)
-        local success = pcall(function()
-            testPath:ComputeAsync(myPos, fleePos)
-        end)
-        if success and testPath.Status == Enum.PathStatus.Success then
-            return fleePos
+        local pos = myPos + testDir * fleeDist
+        pos = Vector3.new(math.clamp(pos.X, -500, 500), pos.Y, math.clamp(pos.Z, -500, 500))
+        local p2 = PathfindingService:CreatePath(PATH_OPTIONS)
+        local ok = pcall(function() p2:ComputeAsync(myPos, pos) end)
+        if ok and p2.Status == Enum.PathStatus.Success then
+            return pos
         end
     end
-    return myPos + direction * 40
+    -- Last resort: just run straight back (no pathfinding)
+    return myPos + direction * fleeDist
 end
 
--- // PATHFINDING MOVE // --
+-- // PATHFINDING MOVE (with timeout) // --
 local function moveToPosition(targetPos)
     if not RootPart or not Humanoid or MovingToTarget then return false end
     local path = PathfindingService:CreatePath(PATH_OPTIONS)
@@ -144,6 +199,7 @@ local function moveToPosition(targetPos)
         path:ComputeAsync(RootPart.Position, targetPos)
     end)
     if not success or path.Status ~= Enum.PathStatus.Success then
+        -- No path: just move in straight line
         Humanoid:MoveTo(targetPos)
         return false
     end
@@ -161,7 +217,7 @@ local function moveToPosition(targetPos)
         end
         Humanoid:MoveTo(waypoint.Position)
         local startTime = tick()
-        while (RootPart.Position - waypoint.Position).magnitude > 3 do
+        while (RootPart.Position - waypoint.Position).magnitude > 4 do
             if tick() - startTime > 2 then break end
             if not AIEnabled or not ScriptActive then break end
             task.wait(0.05)
@@ -193,15 +249,19 @@ local function scanGenerators()
     return #Generators
 end
 
--- // CORRECT GENERATOR INTERACTION // --
+-- // FIXED GENERATOR INTERACTION (HOLD FOR 0.5 SEC) // --
 local function interactWithGenerator(gen)
     local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
     if prompt then
+        -- Simulate holding the prompt (many games require hold)
         pcall(function()
-            prompt:Prompt()
+            prompt:InputHoldStart()
+            task.wait(0.5)   -- hold for half a second
+            prompt:InputHoldEnd()
         end)
         return
     end
+    -- Fallback: ClickDetector
     local click = gen:FindFirstChildWhichIsA("ClickDetector")
     if click and RootPart then
         pcall(function()
@@ -209,6 +269,7 @@ local function interactWithGenerator(gen)
         end)
         return
     end
+    -- Fallback: Remote event
     local remote = gen.Parent:FindFirstChild("GenerateRemote") or 
                    game:GetService("ReplicatedStorage"):FindFirstChild("Generate")
     if remote and remote:IsA("RemoteEvent") then
@@ -218,50 +279,19 @@ local function interactWithGenerator(gen)
     end
 end
 
--- // STAMINA HACK (XENO) // --
-local function applyStaminaHack()
-    if not Humanoid then return end
-    local staminaProp = Humanoid:FindFirstChild("Stamina")
-    if staminaProp and staminaProp:IsA("NumberValue") then
-        setreadonly(staminaProp, false)
-        staminaProp.Value = 100
-        setreadonly(staminaProp, true)
-    end
-    if Humanoid.Sprint then
-        Humanoid.Sprint = true
-    end
-    pcall(function()
-        local mt = getrawmetatable(Humanoid)
-        if mt and mt.__index then
-            local old = mt.__index
-            mt.__index = function(self, k)
-                if k == "Stamina" then return 100 end
-                return old(self, k)
-            end
-        end
-    end)
-end
-
--- // MAIN AI TICK (only runs if alive and not in lobby) // --
+-- // MAIN AI TICK // --
 local function aiTick()
     if not AIEnabled or not ScriptActive then return end
-    
-    -- Check if player is alive and in a match
     if not isPlayerAliveAndInMatch() then
-        -- If we were previously moving, stop movement to prevent weird lobby walking
-        if Humanoid then
-            Humanoid:MoveTo(Vector3.new(0,0,0))
-        end
+        if Humanoid then Humanoid:MoveTo(Vector3.new(0,0,0)) end
         return
     end
-    
-    -- Ensure character references are fresh
     if not PlayerChar or not Humanoid or not RootPart then
         updateChar()
         if not PlayerChar then return end
     end
     
-    -- Killer avoidance
+    -- 1. Killer avoidance
     KillerModel = findKiller()
     if KillerModel and RootPart then
         local killerRoot = KillerModel:FindFirstChild("HumanoidRootPart")
@@ -282,7 +312,7 @@ local function aiTick()
         Fleeing = false
     end
     
-    -- Generator farming
+    -- 2. Generator farming
     if #Generators == 0 then
         scanGenerators()
         return
@@ -301,16 +331,16 @@ local function aiTick()
     end
     
     if nearestGen then
-        if nearestDist > 4 then
+        if nearestDist > 5 then
             moveToPosition(nearestGen.Position)
         else
             interactWithGenerator(nearestGen)
-            task.wait(0.3)
+            task.wait(0.5)  -- wait after interaction
         end
     end
 end
 
--- // BACKGROUND LOOPS (with exit condition and lobby detection inside aiTick) // --
+-- // BACKGROUND LOOPS // --
 task.spawn(function()
     while ScriptActive do
         task.wait(0.25)
@@ -320,9 +350,9 @@ end)
 
 task.spawn(function()
     while ScriptActive do
-        task.wait(0.3)
+        task.wait(0.2)
         if AIEnabled then
-            applyStaminaHack()
+            applyInfiniteStamina()
         end
     end
 end)
@@ -332,24 +362,22 @@ task.spawn(function()
         task.wait(4)
         if AIEnabled then
             scanGenerators()
+            removeBlurEffects()
         end
     end
 end)
 
--- // LOBBY/DEAD DETECTION LOOP (optional: update status text) // --
-task.spawn(function()
-    while ScriptActive do
-        task.wait(1)
-        local alive = isPlayerAliveAndInMatch()
-        if not WasAliveLastCheck and alive then
-            -- just became alive, refresh generators
-            scanGenerators()
-        end
-        WasAliveLastCheck = alive
+-- // SUPPRESS GAME'S "Touched" SPAM (optional) // --
+local oldWarn = warn
+warn = function(...)
+    local msg = tostring(...)
+    if msg:find("ontouched") or msg:find("Touched") then
+        return
     end
-end)
+    oldWarn(...)
+end
 
--- // GUI HUB (with HIDE and CLOSE buttons) // --
+-- // GUI HUB (with HIDE and CLOSE) // --
 local function createHub()
     local sg = Instance.new("ScreenGui")
     sg.Name = "AdvancedAIHub"
@@ -516,6 +544,10 @@ local function createHub()
     closeBtn.MouseButton1Click:Connect(function()
         AIEnabled = false
         ScriptActive = false
+        -- Restore original walk speed if possible
+        if Humanoid and OriginalWalkSpeed then
+            Humanoid.WalkSpeed = OriginalWalkSpeed
+        end
         sg:Destroy()
         print("🔴 AI and script fully disabled. Menu closed.")
     end)
@@ -527,15 +559,20 @@ local function createHub()
             toggle.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
             updateChar()
             scanGenerators()
-            status.Text = "AI ACTIVE | Will run only when alive"
+            removeBlurEffects()
+            status.Text = "AI ACTIVE | Infinite sprint + blur removed"
         else
             toggle.Text = "🔴 AI OFF"
             toggle.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
             status.Text = "AI OFF"
+            -- restore original walk speed
+            if Humanoid and OriginalWalkSpeed then
+                Humanoid.WalkSpeed = OriginalWalkSpeed
+            end
         end
     end)
     
-    -- Status updater (shows alive/lobby state)
+    -- Status updater
     task.spawn(function()
         while ScriptActive and sg and sg.Parent do
             task.wait(1)
@@ -562,7 +599,7 @@ local function createHub()
         end
     end)
     
-    -- Draggable title
+    -- Draggable
     local dragStart, dragPos, dragging = nil
     title.InputBegan:Connect(function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -589,7 +626,8 @@ LP.CharacterAdded:Connect(function()
     updateChar()
     if AIEnabled then
         scanGenerators()
+        removeBlurEffects()
     end
 end)
 createHub()
-print("✅ Advanced AI Pathfinder with lobby/dead detection loaded. AI only runs when alive and in match. Xeno ready.")
+print("✅ FULLY FIXED AI: Generator hold interaction, real sprint speed, blur removed, killer flee. Xeno ready.")
