@@ -1,38 +1,38 @@
 --[[
-    FORSAKEN AI – OPTIMIZED (No Freeze, Accurate Generator)
-    - Only real generators (name contains "Generator")
-    - Flee only when killer < slider value (default 40)
-    - Minigame solver for numbered dots (based on your UI numbers)
+    FORSAKEN AI – FINAL CORRECTIONS
+    - Killer detection (only real killers, not survivors)
+    - Generator interaction using screen click (not just FireClick)
+    - Flee with wall avoidance (raycasts to avoid walls)
 --]]
 
 -- // SERVICES // --
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local VirtualInput = game:GetService("VirtualInput")
+local RunService = game:GetService("RunService")
 local LP = Players.LocalPlayer
+
+-- // KILLER NAMES (case-insensitive) //
+local KILLER_NAMES = {
+    "noli", "slasher", "c00lkidd", "john doe", "1x1x1x1", "guest 666", "nosferatu"
+}
 
 -- // STATE // --
 local AIEnabled = false
 local ScriptActive = true
-local SliderValue = 40                -- default alert radius (reduced)
+local SliderValue = 40
 local MovingToTarget = false
 local PlayerChar, Humanoid, RootPart
-local Generators = {}                 -- only real generators
+local Generators = {}               -- only real generators (with ProximityPrompt or ClickDetector)
 local CompletedGenerators = {}
 local CurrentAction = "Idle"
 local LastFleeTime = 0
 local RoundActive = false
-local LastDebugUpdate = 0
 
 -- // CONSTANTS // --
 local WALK_SPEED = 24
-local CARDINAL_DIRECTIONS = {
-    Vector3.new(1,0,0), Vector3.new(0.707,0,0.707), Vector3.new(0,0,1),
-    Vector3.new(-0.707,0,0.707), Vector3.new(-1,0,0), Vector3.new(-0.707,0,-0.707),
-    Vector3.new(0,0,-1), Vector3.new(0.707,0,-0.707)
-}
 
--- // DEBUG OVERLAY (reduced update frequency) //
+-- // DEBUG OVERLAY // --
 local DebugLabel
 local function createOverlay()
     local sg = Instance.new("ScreenGui")
@@ -89,19 +89,44 @@ local function isRoundActive()
     return (PlayerChar and Humanoid and Humanoid.Health > 0)
 end
 
--- // KILLER DETECTION (any other player) // --
+-- // REAL KILLER DETECTION (filters survivors) // --
 local function getNearestKiller()
     if not RootPart then return nil, math.huge end
     local nearest = nil
     local nearestDist = math.huge
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= LP and plr.Character then
-            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+            local char = plr.Character
+            local hrp = char:FindFirstChild("HumanoidRootPart")
             if hrp then
-                local d = (RootPart.Position - hrp.Position).magnitude
-                if d < nearestDist then
-                    nearestDist = d
-                    nearest = hrp
+                -- Check if this player is a killer
+                local isKiller = false
+                -- 1. Team check
+                if plr.Team and plr.Team.Name:lower():find("killer") then
+                    isKiller = true
+                end
+                -- 2. Name check (killers have specific names)
+                if not isKiller then
+                    local name = plr.Name:lower()
+                    for _, kname in pairs(KILLER_NAMES) do
+                        if name:find(kname) then
+                            isKiller = true
+                            break
+                        end
+                    end
+                end
+                -- 3. Attribute or tag
+                if not isKiller then
+                    if char:FindFirstChild("KillerTag") or char:GetAttribute("IsKiller") then
+                        isKiller = true
+                    end
+                end
+                if isKiller then
+                    local d = (RootPart.Position - hrp.Position).magnitude
+                    if d < nearestDist then
+                        nearestDist = d
+                        nearest = hrp
+                    end
                 end
             end
         end
@@ -109,56 +134,58 @@ local function getNearestKiller()
     return nearest, nearestDist
 end
 
--- // RANDOM FLEE DIRECTION (cardinal + random offset) // --
-local function getRandomFleeDirection(killerPos)
-    local away = (RootPart.Position - killerPos).unit
-    local bestDir = away
-    local bestDot = -1
-    for _, dir in pairs(CARDINAL_DIRECTIONS) do
-        local dot = away:Dot(dir)
-        if dot > bestDot then
-            bestDot = dot
-            bestDir = dir
-        end
-    end
-    local randomOffset = math.rad(math.random(-45, 45))
-    local randomDir = Vector3.new(
-        bestDir.X * math.cos(randomOffset) - bestDir.Z * math.sin(randomOffset),
-        0,
-        bestDir.X * math.sin(randomOffset) + bestDir.Z * math.cos(randomOffset)
-    ).unit
-    return randomDir
-end
-
--- // GENERATOR SCANNING – ONLY REAL GENERATORS // --
+-- // GENERATOR SCANNING (only parts with ProximityPrompt) // --
 local function scanGenerators()
     local newGens = {}
-    -- Look for parts with "Generator" in name (case insensitive)
-    for _, part in pairs(workspace:GetDescendants()) do
-        if part:IsA("BasePart") and (part.Name:lower():find("generator") or (part.Parent and part.Parent.Name:lower():find("generator"))) then
-            if not table.find(CompletedGenerators, part) then
+    for _, prompt in pairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") and prompt.Parent then
+            local part = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart")
+            if part and not table.find(CompletedGenerators, part) then
                 table.insert(newGens, part)
             end
         end
     end
-    -- Also check ProximityPrompts that belong to a generator parent
-    for _, prompt in pairs(workspace:GetDescendants()) do
-        if prompt:IsA("ProximityPrompt") and prompt.Parent then
-            local parent = prompt.Parent
-            if parent.Name:lower():find("generator") then
-                local part = parent:IsA("BasePart") and parent or parent:FindFirstChildWhichIsA("BasePart")
-                if part and not table.find(newGens, part) and not table.find(CompletedGenerators, part) then
-                    table.insert(newGens, part)
-                end
+    -- Also include ClickDetectors if they have parent part
+    for _, detector in pairs(workspace:GetDescendants()) do
+        if detector:IsA("ClickDetector") and detector.Parent and detector.Parent:IsA("BasePart") then
+            local part = detector.Parent
+            if not table.find(newGens, part) and not table.find(CompletedGenerators, part) then
+                table.insert(newGens, part)
             end
         end
     end
     Generators = newGens
-    updateDebug(string.format("Scanned %d real generators", #Generators))
+    updateDebug(string.format("Scanned %d generators (only with ProximityPrompt/ClickDetector)", #Generators))
     return #Generators
 end
 
--- // MINIGAME SOLVER – matches numbers from your UI // --
+-- // FLEE WITH WALL AVOIDANCE // --
+local function getSafeFleePosition(killerPos)
+    if not RootPart then return nil end
+    local awayDir = (RootPart.Position - killerPos).unit
+    -- Try multiple angles (0°, ±45°, ±90°)
+    local angles = {0, 45, -45, 90, -90}
+    for _, angle in ipairs(angles) do
+        local rad = math.rad(angle)
+        local dir = Vector3.new(
+            awayDir.X * math.cos(rad) - awayDir.Z * math.sin(rad),
+            0,
+            awayDir.X * math.sin(rad) + awayDir.Z * math.cos(rad)
+        ).unit
+        local testPos = RootPart.Position + dir * 25
+        testPos = Vector3.new(math.clamp(testPos.X, -500, 500), testPos.Y, math.clamp(testPos.Z, -500, 500))
+        -- Raycast to see if there's a wall between current position and testPos
+        local ray = Ray.new(RootPart.Position, (testPos - RootPart.Position).unit * 25)
+        local hit = workspace:FindPartOnRay(ray, PlayerChar)
+        if not hit then
+            return testPos  -- clear path
+        end
+    end
+    -- Fallback: just move away in original direction
+    return RootPart.Position + awayDir * 25
+end
+
+-- // MINIGAME SOLVER (based on your UI numbers) // --
 local function solveMinigame()
     local minigameFrame = nil
     for i = 1, 30 do
@@ -179,7 +206,7 @@ local function solveMinigame()
         return false
     end
 
-    -- Find all buttons with numbers (text digits)
+    -- Find all buttons with numbers
     local dots = {}
     for _, child in pairs(minigameFrame:GetDescendants()) do
         if (child:IsA("TextButton") or child:IsA("ImageButton")) and child.Visible then
@@ -233,68 +260,82 @@ local function solveMinigame()
     return true
 end
 
--- // INTERACT WITH GENERATOR (hold F until minigame appears) // --
+-- // INTERACT WITH GENERATOR (screen click + hold) // --
 local function interactWithGenerator(gen)
     updateDebug("Interacting with generator: " .. gen.Name)
+    -- Try ProximityPrompt first
     local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
-    if not prompt then
-        updateDebug("No proximity prompt – using click")
-        local click = gen:FindFirstChildWhichIsA("ClickDetector")
-        if click then pcall(function() click:FireClick(RootPart) end) end
+    if prompt then
+        pcall(function()
+            VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+            task.wait(0.5)
+            VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+        end)
+        -- Wait for minigame UI
+        for i = 1, 30 do
+            task.wait(0.1)
+            local playerGui = LP:FindFirstChild("PlayerGui")
+            if playerGui then
+                for _, gui in pairs(playerGui:GetDescendants()) do
+                    if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
+                        updateDebug("Minigame opened via ProximityPrompt")
+                        local solved = solveMinigame()
+                        if solved then
+                            table.insert(CompletedGenerators, gen)
+                            for i, g in pairs(Generators) do
+                                if g == gen then table.remove(Generators, i) break end
+                            end
+                            return true
+                        end
+                    end
+                end
+            end
+        end
         return false
     end
-    -- Hold F key
-    pcall(function() VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game) end)
-    local minigameOpened = false
-    for i = 1, 30 do
-        task.wait(0.1)
-        local playerGui = LP:FindFirstChild("PlayerGui")
-        if playerGui then
-            for _, gui in pairs(playerGui:GetDescendants()) do
-                if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                    minigameOpened = true
-                    break
-                end
-            end
-        end
-        if minigameOpened then break end
-    end
-    pcall(function() VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
     
-    if minigameOpened then
-        updateDebug("Minigame opened, solving...")
-        local solved = solveMinigame()
-        if solved then
-            -- Wait for minigame to close
-            for i = 1, 40 do
+    -- No ProximityPrompt → use ClickDetector via screen click
+    local click = gen:FindFirstChildWhichIsA("ClickDetector")
+    if click and RootPart then
+        -- Get screen position of the generator part
+        local screenPos, onScreen = workspace.CurrentCamera:WorldToScreenPoint(gen.Position)
+        if onScreen then
+            pcall(function()
+                VirtualInput:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, true, game, 0)
                 task.wait(0.3)
+                VirtualInput:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, false, game, 0)
+            end)
+            updateDebug("Clicked generator at screen position")
+            -- Wait for minigame UI
+            for i = 1, 30 do
+                task.wait(0.2)
                 local playerGui = LP:FindFirstChild("PlayerGui")
                 if playerGui then
-                    local found = false
                     for _, gui in pairs(playerGui:GetDescendants()) do
                         if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                            found = true
-                            break
+                            updateDebug("Minigame opened via click")
+                            local solved = solveMinigame()
+                            if solved then
+                                table.insert(CompletedGenerators, gen)
+                                for i, g in pairs(Generators) do
+                                    if g == gen then table.remove(Generators, i) break end
+                                end
+                                return true
+                            end
                         end
-                    end
-                    if not found then
-                        updateDebug("Generator completed!")
-                        table.insert(CompletedGenerators, gen)
-                        for i, g in pairs(Generators) do
-                            if g == gen then table.remove(Generators, i) break end
-                        end
-                        return true
                     end
                 end
             end
+        else
+            updateDebug("Generator not on screen")
         end
     else
-        updateDebug("Minigame did not open")
+        updateDebug("No interaction method found")
     end
     return false
 end
 
--- // MAIN AI LOOP (optimized: no heavy raycasts, flee cooldown) // --
+-- // MAIN AI LOOP // --
 local function aiTick()
     if not AIEnabled or not ScriptActive then return end
     if not PlayerChar or not Humanoid or not RootPart then
@@ -307,18 +348,17 @@ local function aiTick()
         return
     end
 
-    -- Killer detection (only flee if within slider radius)
+    -- Killer detection (only real killers)
     local killerObj, killerDist = getNearestKiller()
     if killerObj and killerDist <= SliderValue then
         CurrentAction = string.format("Fleeing (killer %.0f studs)", killerDist)
-        -- Throttle flee to once per second to avoid spam
         local now = tick()
-        if now - LastFleeTime > 1 then
+        if now - LastFleeTime > 0.8 then
             LastFleeTime = now
-            local fleeDir = getRandomFleeDirection(killerObj.Position)
-            local fleePos = RootPart.Position + fleeDir * 35
-            fleePos = Vector3.new(math.clamp(fleePos.X, -500, 500), fleePos.Y, math.clamp(fleePos.Z, -500, 500))
-            Humanoid:MoveTo(fleePos)
+            local fleePos = getSafeFleePosition(killerObj.Position)
+            if fleePos then
+                Humanoid:MoveTo(fleePos)
+            end
         end
         return
     end
@@ -353,7 +393,7 @@ local function aiTick()
     end
 end
 
--- // INFINITE STAMINA & BLUR // --
+-- // INFINITE STAMINA // --
 local function applyStamina()
     if not Humanoid then return end
     if Humanoid.WalkSpeed < WALK_SPEED then Humanoid.WalkSpeed = WALK_SPEED end
@@ -369,10 +409,10 @@ local function applyStamina()
     end
 end
 
--- // BACKGROUND LOOPS (reduced frequency) // --
+-- // BACKGROUND LOOPS // --
 task.spawn(function()
     while ScriptActive do
-        task.wait(0.5)   -- AI tick every 0.5 sec (less spam)
+        task.wait(0.5)
         aiTick()
     end
 end)
@@ -386,12 +426,12 @@ end)
 
 task.spawn(function()
     while ScriptActive do
-        task.wait(6)     -- rescan generators every 6 seconds
+        task.wait(6)
         if AIEnabled then scanGenerators() end
     end
 end)
 
--- // DEBUG STATUS UPDATER (once per second) // --
+-- // DEBUG STATUS UPDATER // --
 task.spawn(function()
     while ScriptActive do
         task.wait(1)
@@ -402,10 +442,10 @@ task.spawn(function()
     end
 end)
 
--- // GUI HUB (with rejoin, hide, close) // --
+-- // GUI HUB // --
 local function createHub()
     local sg = Instance.new("ScreenGui")
-    sg.Name = "ForsakenAIOptimized"
+    sg.Name = "ForsakenAIFinalFixed"
     sg.Parent = game.CoreGui
     sg.ResetOnSpawn = false
 
@@ -420,7 +460,7 @@ local function createHub()
     local title = Instance.new("TextLabel")
     title.Size = UDim2.new(1,0,0,35)
     title.BackgroundTransparency = 1
-    title.Text = "⚡ FORSAKEN AI (OPTIMIZED) ⚡"
+    title.Text = "🔪 FORSAKEN AI (FINAL FIXES) 🔪"
     title.TextColor3 = Color3.fromRGB(0,200,255)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 15
@@ -587,7 +627,7 @@ local function createHub()
             toggle.BackgroundColor3 = Color3.fromRGB(0,180,80)
             updateChar()
             scanGenerators()
-            updateDebug("AI enabled – optimized mode")
+            updateDebug("AI enabled – final fixes active")
         else
             toggle.Text = "🔴 AI OFF"
             toggle.BackgroundColor3 = Color3.fromRGB(0,120,200)
@@ -637,4 +677,4 @@ LP.CharacterAdded:Connect(function()
     if AIEnabled then scanGenerators() end
 end)
 createHub()
-updateDebug("Optimized AI loaded. Only real generators (name 'Generator'). Flee radius 40 (adjustable). No wall raycasts → no freeze.")
+updateDebug("Final fixes loaded: real killers only, screen-click generators, wall-aware flee.")
