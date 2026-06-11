@@ -1,441 +1,477 @@
-if not getgenv().CursedsakenLoaded then getgenv().CursedsakenLoaded = true else
-    local old = game:GetService("CoreGui"):FindFirstChild("CursedsakenHub")
-        or game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("CursedsakenHub")
-    if old then old:Destroy() end
-end
+--[[
+    ██████╗ ██████╗ █████╗ ██████╗ ██╗ ██╗ █████╗ ███╗ ██╗ ██████╗███████╗██████╗ 
+    ██╔══██╗██╔══██╗██╔══██╗██╔══██╗██║ ██║██╔══██╗████╗ ██║██╔════╝██╔════╝██╔══██╗
+    ██████╔╝██████╔╝███████║██║ ██║██║ ██║███████║██╔██╗ ██║██║ █████╗ ██║ ██║
+    ██╔═══╝ ██╔══██╗██╔══██║██║ ██║╚██╗ ██╔╝██╔══██║██║╚██╗██║██║ ██╔══╝ ██║ ██║
+    ██║ ██║ ██║██║ ██║██████╔╝ ╚████╔╝ ██║ ██║██║ ╚████║╚██████╗███████╗██████╔╝
+    ╚═╝ ╚═╝ ╚═╝╚═╝ ╚═╝╚═════╝ ╚═══╝ ╚═╝ ╚═╝╚═╝ ╚═══╝ ╚═════╝╚══════╝╚═════╝ 
+    
+    KILLER RADIUS BASED ON SLIDER | TRUE PATHFINDING AROUND WALLS | XENO READY
+--]]
 
+-- // SERVICES // --
+local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
-local Players           = game:GetService("Players")
-local Teams             = game:GetService("Teams")
-local UserInputService  = game:GetService("UserInputService")
-local RunService        = game:GetService("RunService")
-local TweenService      = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local LP = Players.LocalPlayer
 
-local localPlayer = Players.LocalPlayer
-local character   = localPlayer.Character or localPlayer.CharacterAdded:Wait()
-local humanoid    = character:WaitForChild("Humanoid")
-local rootPart    = character:WaitForChild("HumanoidRootPart")
+-- // STATE // --
+local AIEnabled = false
+local AISliderValue = 40 -- 0 = flee only when killer is right on you, 100 = flee within 100 studs
+local MovingToTarget = false
+local CurrentPath = nil
+local LastPathTime = 0
+local Fleeing = false
 
-local CONTROLS = {
-    Enable_AI_Play            = false,
-    Avoidance_Distance        = 70,
-    Disable_Charge_Generators = false,
-    Disable_Auto_Reset        = true,
-    Draw_Paths                = false,
+-- // REFERENCES // --
+local PlayerChar, Humanoid, RootPart
+local Generators = {}
+local KillerModel = nil
+
+-- // PATHFINDING CONFIG // --
+local PATH_OPTIONS = {
+    AgentRadius = 2.5, -- slightly wider to avoid tight corners
+    AgentHeight = 5,
+    AgentCanJump = true,
+    AgentMaxSlope = 60,
+    WaypointSpacing = 3,
+    Costs = { Water = 100, Dangerous = math.huge }
 }
 
-local FORSAKEN_KILLERS = {
-    ["Slasher"]   = true,
-    ["Jason"]     = true,
-    ["John Doe"]  = true,
-    ["Noli"]      = true,
-    ["1x1x1x1"]  = true,
-    ["c00lkidd"]  = true,
-    ["Guest 666"] = true,
-    ["Slenderman"]= true,
-    ["Sixer"]     = true,
-}
-
--- PATHFINDING STATE VARIABLES
-local isComputingPath    = false
-local activeTargetPosition = nil
-
--- ========================================================
--- 1. BASE SYSTEM PANEL CONVERGER
--- ========================================================
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name             = "CursedsakenHub"
-ScreenGui.ResetOnSpawn     = false
-ScreenGui.ZIndexBehavior   = Enum.ZIndexBehavior.Global
-if gethui then ScreenGui.Parent = gethui() end
-if not ScreenGui.Parent then pcall(function() ScreenGui.Parent = game:GetService("CoreGui") end) end
-if not ScreenGui.Parent then ScreenGui.Parent = localPlayer:WaitForChild("PlayerGui") end
-
-local MainFrame = Instance.new("Frame")
-MainFrame.Size              = UDim2.new(0, 310, 0, 260)
-MainFrame.Position          = UDim2.new(0.35, 0, 0.25, 0)
-MainFrame.BackgroundColor3  = Color3.fromRGB(24, 23, 34)
-MainFrame.BorderSizePixel   = 0
-MainFrame.Active            = true
-MainFrame.Draggable         = true
-MainFrame.Parent            = ScreenGui
-
-local UICorner_Main = Instance.new("UICorner")
-UICorner_Main.CornerRadius = UDim.new(0, 8)
-UICorner_Main.Parent       = MainFrame
-
-local Header = Instance.new("Frame")
-Header.Size             = UDim2.new(1, 0, 0, 35)
-Header.BackgroundColor3 = Color3.fromRGB(30, 29, 43)
-Header.BorderSizePixel  = 0
-Header.Parent           = MainFrame
-
-local UICorner_Header = Instance.new("UICorner")
-UICorner_Header.CornerRadius = UDim.new(0, 8)
-UICorner_Header.Parent       = Header
-
-local Title = Instance.new("TextLabel")
-Title.Size               = UDim2.new(1, -15, 1, 0)
-Title.Position           = UDim2.new(0, 12, 0, 0)
-Title.Text               = "Cursedsaken — AI Play"
-Title.TextColor3         = Color3.fromRGB(245, 245, 255)
-Title.Font               = Enum.Font.SourceSansBold
-Title.TextSize           = 15
-Title.TextXAlignment     = Enum.TextXAlignment.Left
-Title.BackgroundTransparency = 1
-Title.Parent             = Header
-
-local ContentList = Instance.new("Frame")
-ContentList.Name                 = "ContentList"
-ContentList.Size                 = UDim2.new(1, -20, 1, -50)
-ContentList.Position             = UDim2.new(0, 10, 0, 45)
-ContentList.BackgroundTransparency = 1
-ContentList.Parent               = MainFrame
-
-local function createToggle(label, sub, index, key, def)
-    local Row = Instance.new("Frame")
-    Row.Size            = UDim2.new(1, 0, 0, 38)
-    Row.Position        = UDim2.new(0, 0, 0, (index - 1) * 44)
-    Row.BackgroundColor3 = Color3.fromRGB(34, 33, 49)
-    Row.BorderSizePixel = 0
-    Row.ZIndex          = 5
-    Row.Parent          = ContentList
-
-    local UICorner_Row = Instance.new("UICorner")
-    UICorner_Row.CornerRadius = UDim.new(0, 6)
-    UICorner_Row.Parent       = Row
-
-    local L = Instance.new("TextLabel")
-    L.Size               = UDim2.new(0.75, 0, 0, 18)
-    L.Position           = UDim2.new(0, 10, 0, 2)
-    L.Text               = label
-    L.TextColor3         = Color3.fromRGB(255, 255, 255)
-    L.Font               = Enum.Font.SourceSansBold
-    L.TextSize           = 13
-    L.TextXAlignment     = Enum.TextXAlignment.Left
-    L.BackgroundTransparency = 1
-    L.ZIndex             = 6
-    L.Parent             = Row
-
-    local S = Instance.new("TextLabel")
-    S.Size               = UDim2.new(0.75, 0, 0, 14)
-    S.Position           = UDim2.new(0, 10, 0, 18)
-    S.Text               = sub
-    S.TextColor3         = Color3.fromRGB(150, 148, 170)
-    S.Font               = Enum.Font.SourceSans
-    S.TextSize           = 11
-    S.TextXAlignment     = Enum.TextXAlignment.Left
-    S.BackgroundTransparency = 1
-    S.ZIndex             = 6
-    S.Parent             = Row
-
-    local Btn = Instance.new("TextButton")
-    Btn.Size             = UDim2.new(0, 38, 0, 18)
-    Btn.Position         = UDim2.new(1, -48, 0, 10)
-    Btn.BackgroundColor3 = def and Color3.fromRGB(80, 75, 145) or Color3.fromRGB(50, 48, 68)
-    Btn.Text             = ""
-    Btn.AutoButtonColor  = false
-    Btn.ZIndex           = 7
-    Btn.Parent           = Row
-
-    local UICorner_Sw = Instance.new("UICorner")
-    UICorner_Sw.CornerRadius = UDim.new(1, 0)
-    UICorner_Sw.Parent       = Btn
-
-    local Ball = Instance.new("Frame")
-    local ballCorner = Instance.new("UICorner")
-    ballCorner.CornerRadius = UDim.new(1, 0)
-    ballCorner.Parent       = Ball
-    Ball.Size               = UDim2.new(0, 14, 0, 14)
-    Ball.Position           = def and UDim2.new(1, -16, 0, 2) or UDim2.new(0, 2, 0, 2)
-    Ball.BackgroundColor3   = Color3.fromRGB(255, 255, 255)
-    Ball.BorderSizePixel    = 0
-    Ball.ZIndex             = 8
-    Ball.Parent             = Btn
-
-    Btn.MouseButton1Click:Connect(function()
-        CONTROLS[key] = not CONTROLS[key]
-        local tPos = CONTROLS[key] and UDim2.new(1, -16, 0, 2) or UDim2.new(0, 2, 0, 2)
-        local tCol = CONTROLS[key] and Color3.fromRGB(80, 75, 145) or Color3.fromRGB(50, 48, 68)
-        TweenService:Create(Ball, TweenInfo.new(0.1), {Position = tPos}):Play()
-        TweenService:Create(Btn,  TweenInfo.new(0.1), {BackgroundColor3 = tCol}):Play()
-        if not CONTROLS.Enable_AI_Play and humanoid then
-            humanoid:Move(Vector3.new(0, 0, 0))
-            activeTargetPosition = nil
-        end
-    end)
+-- // UTILITIES // --
+local function updateChar()
+    PlayerChar = LP.Character
+    if PlayerChar then
+        Humanoid = PlayerChar:FindFirstChildOfClass("Humanoid")
+        RootPart = PlayerChar:FindFirstChild("HumanoidRootPart")
+    end
 end
 
-createToggle("Enable AI Play",              "Stupid AI with pathfinding and killer avoidance", 1, "Enable_AI_Play",            false)
-
--- Killer Avoidance Distance slider (Row 2)
-local Row2 = Instance.new("Frame")
-Row2.Size            = UDim2.new(1, 0, 0, 38)
-Row2.Position        = UDim2.new(0, 0, 0, 44)
-Row2.BackgroundColor3 = Color3.fromRGB(34, 33, 49)
-Row2.BorderSizePixel = 0
-Row2.ZIndex          = 5
-Row2.Parent          = ContentList
-
-local UICorner_R2 = Instance.new("UICorner")
-UICorner_R2.CornerRadius = UDim.new(0, 6)
-UICorner_R2.Parent       = Row2
-
-local L2 = Instance.new("TextLabel")
-L2.Size               = UDim2.new(0.5, 0, 1, 0)
-L2.Position           = UDim2.new(0, 10, 0, 0)
-L2.Text               = "Killer Avoidance Distance"
-L2.TextColor3         = Color3.fromRGB(255, 255, 255)
-L2.Font               = Enum.Font.SourceSansBold
-L2.TextSize           = 13
-L2.TextXAlignment     = Enum.TextXAlignment.Left
-L2.BackgroundTransparency = 1
-L2.ZIndex             = 6
-L2.Parent             = Row2
-
-local Disp2 = Instance.new("TextLabel")
-Disp2.Size               = UDim2.new(0, 30, 1, 0)
-Disp2.Position           = UDim2.new(0, 150, 0, 0)
-Disp2.Text               = "70"
-Disp2.TextColor3         = Color3.fromRGB(240, 240, 255)
-Disp2.Font               = Enum.Font.SourceSansBold
-Disp2.TextSize           = 12
-Disp2.BackgroundTransparency = 1
-Disp2.ZIndex             = 6
-Disp2.Parent             = Row2
-
-local Track2 = Instance.new("TextButton")
-Track2.Size             = UDim2.new(0, 95, 0, 4)
-Track2.Position         = UDim2.new(1, -110, 0, 17)
-Track2.BackgroundColor3 = Color3.fromRGB(55, 53, 75)
-Track2.Text             = ""
-Track2.AutoButtonColor  = false
-Track2.ZIndex           = 7
-Track2.Parent           = Row2
-
-local Fill2 = Instance.new("Frame")
-Fill2.Size            = UDim2.new(0.42, 0, 1, 0)
-Fill2.BackgroundColor3 = Color3.fromRGB(100, 95, 185)
-Fill2.BorderSizePixel = 0
-Fill2.ZIndex          = 8
-Fill2.Parent          = Track2
-
-local SldBall2 = Instance.new("Frame")
-SldBall2.Size            = UDim2.new(0, 10, 0, 10)
-SldBall2.Position        = UDim2.new(0.42, -5, 0, -3)
-SldBall2.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-SldBall2.BorderSizePixel = 0
-SldBall2.ZIndex          = 9
-SldBall2.Parent          = Track2
-
-local UICorner_Sb2 = Instance.new("UICorner")
-UICorner_Sb2.CornerRadius = UDim.new(1, 0)
-UICorner_Sb2.Parent       = SldBall2
-
-local drag2 = false
-
-local function updateSlider2(input)
-    local posX = math.clamp(
-        (input.Position.X - Track2.AbsolutePosition.X) / Track2.AbsoluteSize.X,
-        0, 1
-    )
-    Fill2.Size        = UDim2.new(posX, 0, 1, 0)
-    SldBall2.Position = UDim2.new(posX, -5, 0, -3)
-    local fVal = math.floor(10 + (posX * 140))
-    Disp2.Text                 = tostring(fVal)
-    CONTROLS.Avoidance_Distance = fVal
-end
-
-Track2.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        drag2 = true
-        updateSlider2(input)
-    end
-end)
-UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        drag2 = false
-    end
-end)
-UserInputService.InputChanged:Connect(function(input)
-    if drag2 and input.UserInputType == Enum.UserInputType.MouseMovement then
-        updateSlider2(input)
-    end
-end)
-
-createToggle("Disable Charge Generators",   "Stops the AI from holding generator prompts",    3, "Disable_Charge_Generators", false)
-createToggle("Disable Auto Reset If Killer", "Prevents bot from resetting character matches",  4, "Disable_Auto_Reset",        true)
-createToggle("Draw Paths",                   "Enable to draw AI paths",                        5, "Draw_Paths",                false)
-
--- ========================================================
--- 2. AUTOMATION ENVIRONMENT DETECTION (Only target active items)
--- ========================================================
-local function getClosestGenerator()
-    if CONTROLS.Disable_Charge_Generators then return nil end
-    local closestGen, shortestDistance = nil, math.huge
-
-    for _, object in ipairs(workspace:GetDescendants()) do
-        if object:IsA("BasePart") then
-            local name = string.lower(object.Name)
-            if string.find(name, "generator")
-            or string.find(name, "engine")
-            or string.find(name, "genpart") then
-
-                -- CHECK FOR STATE INDICES: Ignores fully repaired objects
-                local parentModel = object:FindFirstAncestorOfClass("Model")
-                local isFixed     = false
-
-                if parentModel then
-                    -- Checks standard status values typical to Forsaken frameworks
-                    local statusValue = parentModel:FindFirstChild("Fixed")
-                        or parentModel:FindFirstChild("Completed")
-                        or parentModel:FindFirstChild("Repaired")
-
-                    if statusValue and (statusValue.Value == true or statusValue.Value == 100) then
-                        isFixed = true
-                    end
-                end
-
-                if not isFixed then
-                    local dist = (rootPart.Position - object.Position).Magnitude
-                    if dist < shortestDistance then
-                        shortestDistance = dist
-                        closestGen       = object
-                    end
+-- // REAL KILLER DETECTION (with team/name check) // --
+local function findKiller()
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LP and plr.Character then
+            local char = plr.Character
+            if char:FindFirstChild("HumanoidRootPart") then
+                -- Check team or name
+                if (plr.Team and (plr.Team.Name:lower():find("killer") or plr.Team.Name:lower():find("monster"))) or
+                   (plr.Name:lower():find("killer") or plr.DisplayName:lower():find("killer")) then
+                    return char
                 end
             end
         end
     end
-
-    return closestGen
-end
-
-local function getKillerPosition()
-    -- Check team-based killer detection first
-    for _, team in ipairs(Teams:GetTeams()) do
-        if string.find(string.lower(team.Name), "killer")
-        or string.find(string.lower(team.Name), "slasher") then
-            for _, player in ipairs(team:GetPlayers()) do
-                if player ~= localPlayer
-                and player.Character
-                and player.Character:FindFirstChild("HumanoidRootPart") then
-                    return player.Character.HumanoidRootPart.Position
-                end
+    -- Fallback: scan workspace for NPC killers
+    for _, obj in pairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and obj:FindFirstChild("Humanoid") and obj:FindFirstChild("HumanoidRootPart") then
+            local name = obj.Name:lower()
+            if name:find("killer") or name:find("monster") or name:find("slender") then
+                return obj
             end
         end
     end
-
-    -- Fallback: scan workspace for known killer model names
-    for _, obj in ipairs(workspace:GetChildren()) do
-        if obj:IsA("Model")
-        and obj.Name ~= localPlayer.Name
-        and (FORSAKEN_KILLERS[obj.Name] or Players:GetPlayerFromCharacter(obj)) then
-            if obj:FindFirstChild("HumanoidRootPart") then
-                return obj.HumanoidRootPart.Position
-            end
-        end
-    end
-
     return nil
 end
 
--- ========================================================
--- 3. OPTIMIZED LATCHED NAVIGATION MOTOR (0 Lag Override)
--- ========================================================
-local currentVisualBeam = nil
-
-local function walkTo(targetPosition)
-    -- LATCH CHECK: Only recalculates if destination shifts more than 4 studs (prevents FPS lag)
-    if activeTargetPosition and (activeTargetPosition - targetPosition).Magnitude < 4 then return end
-    if isComputingPath then return end
-
-    isComputingPath      = true
-    activeTargetPosition = targetPosition
-
-    local path = PathfindingService:CreatePath({
-        AgentRadius   = 2.5,
-        AgentHeight   = 5,
-        AgentCanJump  = true,
-        AgentCanClimb = false,
-    })
-
-    task.spawn(function()
-        local success, _ = pcall(function()
-            path:ComputeAsync(rootPart.Position, targetPosition)
+-- // SMART FLEE: find a point away from killer that is reachable via pathfinding // --
+local function getFleePosition(killerPos, myPos)
+    local direction = (myPos - killerPos).unit
+    -- Try multiple angles to find a safe point (in case straight back is blocked)
+    for angle = 0, 360, 45 do
+        local rad = math.rad(angle)
+        local testDir = Vector3.new(
+            direction.X * math.cos(rad) - direction.Z * math.sin(rad),
+            0,
+            direction.X * math.sin(rad) + direction.Z * math.cos(rad)
+        ).unit
+        local fleePos = myPos + testDir * 40 -- flee 40 studs away
+        -- Clamp to map bounds (assume -500 to 500 range)
+        fleePos = Vector3.new(math.clamp(fleePos.X, -500, 500), fleePos.Y, math.clamp(fleePos.Z, -500, 500))
+        
+        -- Quick check if this point is reachable using a cheap path test
+        local testPath = PathfindingService:CreatePath(PATH_OPTIONS)
+        local success = pcall(function()
+            testPath:ComputeAsync(myPos, fleePos)
         end)
-        isComputingPath = false
+        if success and testPath.Status == Enum.PathStatus.Success then
+            return fleePos
+        end
+    end
+    -- Fallback: just move straight back
+    return myPos + direction * 40
+end
 
-        if success and path.Status == Enum.PathStatus.Success then
-            local waypoints = path:GetWaypoints()
+-- // PATHFINDING MOVE (with waypoint following, jumps, and dynamic re-pathing) // --
+local function moveToPosition(targetPos)
+    if not RootPart or not Humanoid or MovingToTarget then return false end
+    local path = PathfindingService:CreatePath(PATH_OPTIONS)
+    local success = pcall(function()
+        path:ComputeAsync(RootPart.Position, targetPos)
+    end)
+    if not success or path.Status ~= Enum.PathStatus.Success then
+        -- No path found – fallback to straight line (rare)
+        Humanoid:MoveTo(targetPos)
+        return false
+    end
+    
+    local waypoints = path:GetWaypoints()
+    if #waypoints == 0 then return false end
+    
+    MovingToTarget = true
+    for i, waypoint in ipairs(waypoints) do
+        if not AIEnabled then break end
+        if not RootPart or not Humanoid then break end
+        
+        -- Jump if needed
+        if waypoint.Action == Enum.PathWaypointAction.Jump then
+            Humanoid.Jump = true
+            task.wait(0.1)
+        end
+        
+        Humanoid:MoveTo(waypoint.Position)
+        -- Wait until we reach the waypoint or timeout
+        local startTime = tick()
+        while (RootPart.Position - waypoint.Position).magnitude > 3 do
+            if tick() - startTime > 2 then break end -- stuck, abort this path
+            if not AIEnabled then break end
+            task.wait(0.05)
+        end
+    end
+    MovingToTarget = false
+    return true
+end
 
-            if CONTROLS.Draw_Paths and #waypoints > 1 then
-                if not currentVisualBeam then
-                    local att0 = Instance.new("Attachment", rootPart)
-                    local att1 = Instance.new("Attachment", workspace.Terrain)
-                    currentVisualBeam             = Instance.new("Beam", rootPart)
-                    currentVisualBeam.Attachment0 = att0
-                    currentVisualBeam.Attachment1 = att1
-                    currentVisualBeam.Color        = ColorSequence.new(Color3.fromRGB(140, 130, 240))
-                    currentVisualBeam.Width0       = 0.4
-                    currentVisualBeam.Width1       = 0.4
-                end
-                currentVisualBeam.Attachment1.Position = waypoints[#waypoints].Position
-            elseif currentVisualBeam then
-                currentVisualBeam:Destroy()
-                currentVisualBeam = nil
+-- // GENERATOR SCANNER (auto-detect any interactive object) // --
+local function scanGenerators()
+    local newGens = {}
+    for _, prompt in pairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") and prompt.Parent then
+            local part = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart")
+            if part then
+                table.insert(newGens, part)
             end
-
-            -- WALL BUG FIX: Step to next waypoint to prevent pathing through structural meshes
-            if #waypoints > 1 then
-                humanoid:MoveTo(waypoints[2].Position)
+        end
+    end
+    -- Also include any part named generator
+    for _, part in pairs(workspace:GetDescendants()) do
+        if part:IsA("BasePart") and part.Name:lower():find("generator") then
+            if not table.find(newGens, part) then
+                table.insert(newGens, part)
             end
-        else
-            -- Direct move fallback if pathfinding fails
-            humanoid:MoveTo(targetPosition)
+        end
+    end
+    Generators = newGens
+    return #Generators
+end
+
+-- // INTERACT WITH GENERATOR // --
+local function interactWithGenerator(gen)
+    local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
+    if prompt then
+        prompt:InputHoldStart()
+        task.wait(0.2)
+        prompt:InputHoldEnd()
+    else
+        local click = gen:FindFirstChildWhichIsA("ClickDetector")
+        if click then click:FireClick(RootPart) end
+    end
+end
+
+-- // INFINITE STAMINA HACK (Xeno) // --
+local function applyStaminaHack()
+    if not Humanoid then return end
+    -- Method 1: Override Humanoid.Stamina property if exists
+    local staminaProp = Humanoid:FindFirstChild("Stamina")
+    if staminaProp and staminaProp:IsA("NumberValue") then
+        setreadonly(staminaProp, false)
+        staminaProp.Value = 100
+        setreadonly(staminaProp, true)
+    end
+    -- Method 2: Force sprint attribute
+    if Humanoid.Sprint then
+        Humanoid.Sprint = true
+    end
+    -- Method 3: Hook the stamina deduction function (advanced)
+    pcall(function()
+        local mt = getrawmetatable(Humanoid)
+        if mt and mt.__index then
+            local old = mt.__index
+            mt.__index = function(self, k)
+                if k == "Stamina" then return 100 end
+                return old(self, k)
+            end
         end
     end)
 end
 
--- ========================================================
--- CHARACTER SYNC
--- ========================================================
-local function syncCharacter(char)
-    character = char
-    humanoid  = char:WaitForChild("Humanoid")
-    rootPart  = char:WaitForChild("HumanoidRootPart")
-end
-
-localPlayer.CharacterAdded:Connect(syncCharacter)
-if localPlayer.Character then syncCharacter(localPlayer.Character) end
-
--- ========================================================
--- REGULATED GAME TICK CHASSIS
--- ========================================================
-task.spawn(function()
-    while true do
-        task.wait(0.2)
-
-        if CONTROLS.Enable_AI_Play and humanoid and humanoid.Health > 0 and rootPart then
-            local killerPos = getKillerPosition()
-            local targetGen = getClosestGenerator()
-
-            if killerPos and (rootPart.Position - killerPos).Magnitude < CONTROLS.Avoidance_Distance then
-                -- Killer is within avoidance range
-                if not CONTROLS.Disable_Auto_Reset then
-                    humanoid.Health = 0
+-- // MAIN AI DECISION (called every 0.25s) // --
+local function aiTick()
+    if not AIEnabled then return end
+    if not PlayerChar or not Humanoid or not RootPart then
+        updateChar()
+        if not PlayerChar then return end
+    end
+    
+    -- 1. Check killer distance (using slider value as radius)
+    KillerModel = findKiller()
+    local killerDist = nil
+    if KillerModel and RootPart then
+        local killerRoot = KillerModel:FindFirstChild("HumanoidRootPart")
+        if killerRoot then
+            killerDist = (RootPart.Position - killerRoot.Position).magnitude
+            -- If killer is within slider radius -> FLEE
+            if killerDist <= AISliderValue then
+                if not Fleeing then
+                    local fleePos = getFleePosition(killerRoot.Position, RootPart.Position)
+                    moveToPosition(fleePos)
+                    Fleeing = true
                 else
-                    local runDir = (rootPart.Position - killerPos).Unit
-                    walkTo(rootPart.Position + (runDir * 40))
+                    -- Already fleeing, continue moving to the last flee target
+                    -- We'll let the movement continue
                 end
-            elseif targetGen then
-                walkTo(targetGen.Position)
+                return -- flee is highest priority
             else
-                -- No target: clear any lingering movement input
-                if activeTargetPosition then
-                    humanoid:Move(Vector3.new(0, 0, 0))
-                    activeTargetPosition = nil
-                end
+                Fleeing = false
+            end
+        end
+    else
+        Fleeing = false
+    end
+    
+    -- 2. No killer nearby -> go to nearest generator (with pathfinding)
+    if #Generators == 0 then
+        scanGenerators()
+        return
+    end
+    
+    local nearestGen = nil
+    local nearestDist = math.huge
+    for _, gen in pairs(Generators) do
+        if gen and gen.Parent then
+            local d = (RootPart.Position - gen.Position).magnitude
+            if d < nearestDist then
+                nearestDist = d
+                nearestGen = gen
             end
         end
     end
+    
+    if nearestGen then
+        if nearestDist > 4 then
+            moveToPosition(nearestGen.Position)
+        else
+            interactWithGenerator(nearestGen)
+            task.wait(0.3)
+        end
+    end
+end
+
+-- // BACKGROUND LOOPS (THROTTLED FOR PERFORMANCE) // --
+task.spawn(function()
+    while true do
+        task.wait(0.25) -- AI decision every 250ms
+        aiTick()
+    end
 end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.3)
+        if AIEnabled then
+            applyStaminaHack()
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(4)
+        if AIEnabled then
+            scanGenerators()
+        end
+    end
+end)
+
+-- // COOL GUI HUB (WITH SLIDER) // --
+local function createHub()
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "AdvancedAIHub"
+    sg.Parent = game.CoreGui
+    sg.ResetOnSpawn = false
+    
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 340, 0, 260)
+    frame.Position = UDim2.new(0.5, -170, 0.5, -130)
+    frame.BackgroundColor3 = Color3.fromRGB(8, 8, 18)
+    frame.BackgroundTransparency = 0.2
+    frame.BorderSizePixel = 0
+    frame.Parent = sg
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 12); Instance.new("UICorner").Parent = frame
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(255, 50, 100)
+    stroke.Thickness = 1.5
+    stroke.Parent = frame
+    
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 35)
+    title.BackgroundTransparency = 1
+    title.Text = "🔪 ADVANCED AI PATHFINDER 🔪"
+    title.TextColor3 = Color3.fromRGB(255, 80, 120)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 15
+    title.Parent = frame
+    
+    local toggle = Instance.new("TextButton")
+    toggle.Size = UDim2.new(0, 200, 0, 45)
+    toggle.Position = UDim2.new(0.5, -100, 0, 55)
+    toggle.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
+    toggle.Text = "🔴 AI OFF"
+    toggle.TextColor3 = Color3.new(1,1,1)
+    toggle.Font = Enum.Font.GothamBold
+    toggle.TextSize = 18
+    toggle.Parent = frame
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 8); Instance.new("UICorner").Parent = toggle
+    
+    local sliderFrame = Instance.new("Frame")
+    sliderFrame.Size = UDim2.new(0, 280, 0, 50)
+    sliderFrame.Position = UDim2.new(0.5, -140, 0, 115)
+    sliderFrame.BackgroundTransparency = 1
+    sliderFrame.Parent = frame
+    
+    local sliderLabel = Instance.new("TextLabel")
+    sliderLabel.Size = UDim2.new(0, 140, 0, 20)
+    sliderLabel.Position = UDim2.new(0, 0, 0, 0)
+    sliderLabel.BackgroundTransparency = 1
+    sliderLabel.Text = "Killer Alert Radius: 40"
+    sliderLabel.TextColor3 = Color3.fromRGB(255, 180, 180)
+    sliderLabel.Font = Enum.Font.Gotham
+    sliderLabel.TextSize = 12
+    sliderLabel.Parent = sliderFrame
+    
+    local sliderBg = Instance.new("Frame")
+    sliderBg.Size = UDim2.new(0, 220, 0, 6)
+    sliderBg.Position = UDim2.new(0, 0, 0, 22)
+    sliderBg.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    sliderBg.BorderSizePixel = 0
+    sliderBg.Parent = sliderFrame
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0.4, 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(255, 80, 120)
+    fill.BorderSizePixel = 0
+    fill.Parent = sliderBg
+    local knob = Instance.new("TextButton")
+    knob.Size = UDim2.new(0, 14, 0, 14)
+    knob.Position = UDim2.new(0.4, -7, 0, -4)
+    knob.BackgroundColor3 = Color3.new(1,1,1)
+    knob.Text = ""
+    knob.AutoButtonColor = false
+    knob.Parent = sliderFrame
+    Instance.new("UICorner").CornerRadius = UDim.new(1,0); Instance.new("UICorner").Parent = knob
+    
+    local status = Instance.new("TextLabel")
+    status.Size = UDim2.new(1, -20, 0, 35)
+    status.Position = UDim2.new(0, 10, 0, 190)
+    status.BackgroundTransparency = 1
+    status.Text = "Ready"
+    status.TextColor3 = Color3.fromRGB(200, 200, 230)
+    status.Font = Enum.Font.Gotham
+    status.TextSize = 12
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.Parent = frame
+    
+    local function setSliderValue(val)
+        val = math.clamp(val, 0, 100)
+        AISliderValue = val
+        local percent = val / 100
+        fill.Size = UDim2.new(percent, 0, 1, 0)
+        knob.Position = UDim2.new(percent, -7, 0, -4)
+        sliderLabel.Text = "Killer Alert Radius: " .. math.floor(val)
+    end
+    setSliderValue(40)
+    
+    knob.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            local moveConn, endConn
+            moveConn = UserInputService.InputChanged:Connect(function(io)
+                if io.UserInputType == Enum.UserInputType.MouseMovement then
+                    local relX = math.clamp(io.Position.X - sliderBg.AbsolutePosition.X, 0, sliderBg.AbsoluteSize.X)
+                    local newVal = math.floor((relX / sliderBg.AbsoluteSize.X) * 100)
+                    setSliderValue(newVal)
+                end
+            end)
+            endConn = UserInputService.InputEnded:Connect(function(io)
+                if io.UserInputType == Enum.UserInputType.MouseButton1 then
+                    moveConn:Disconnect()
+                    endConn:Disconnect()
+                end
+            end)
+        end
+    end)
+    
+    toggle.MouseButton1Click:Connect(function()
+        AIEnabled = not AIEnabled
+        if AIEnabled then
+            toggle.Text = "🟢 AI ON"
+            toggle.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
+            updateChar()
+            scanGenerators()
+            status.Text = "AI ACTIVE | Pathfinding around walls | Stamina hacked"
+        else
+            toggle.Text = "🔴 AI OFF"
+            toggle.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
+            status.Text = "AI OFF"
+        end
+    end)
+    
+    -- Status updater
+    task.spawn(function()
+        while true do
+            task.wait(1.5)
+            if AIEnabled then
+                local killer = findKiller()
+                local distText = ""
+                if killer and RootPart then
+                    local kr = killer:FindFirstChild("HumanoidRootPart")
+                    if kr then
+                        local d = (RootPart.Position - kr.Position).magnitude
+                        distText = string.format(" | Killer: %.1f studs", d)
+                    else
+                        distText = " | Killer: near"
+                    end
+                else
+                    distText = " | Killer: none"
+                end
+                status.Text = string.format("Gens: %d%s | Alert: %d", #Generators, distText, AISliderValue)
+            end
+        end
+    end)
+    
+    -- Dragging
+    local dragStart, dragPos, dragging = nil
+    title.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = inp.Position
+            dragPos = frame.Position
+            inp.Changed:Connect(function()
+                if inp.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = inp.Position - dragStart
+            frame.Position = UDim2.new(dragPos.X.Scale, dragPos.X.Offset + delta.X, dragPos.Y.Scale, dragPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+
+-- // INIT // --
+updateChar()
+LP.CharacterAdded:Connect(function(char)
+    task.wait(0.3)
+    updateChar()
+    if AIEnabled then scanGenerators() end
+end)
+createHub()
+print("🔥 Advanced AI Pathfinder loaded. Killer radius = slider value. Pathfinding goes around walls. Xeno ready.")
