@@ -6,21 +6,18 @@
     ███████║╚██████╔╝██║  ██║██║     ██║  ██║██║  ██╗███████╗██║ ╚████║
     ╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝
 
-    FORSAKEN AI - ULTIMATE EDITION
-    + Customizable GUI (Neon Theme)
-    + Advanced Map Detection (18 maps)
-    + Infinite Stamina & Sprint
-    + Auto Generator Repair (with Minigame Solver)
-    + Smart Killer Evasion (Distance Slider)
-    + Obstacle Avoidance (Raycast-based)
-    + Completed Generator Blacklist
+    FORSAKEN AI - PATHFINDING EDITION
+    + Genuine Pathfinding (walls/hazards avoided)
+    + Reliable Generator Interaction (holds F, clicks if needed)
+    + Smart Flee (pathfind away from killer)
+    + Cool Neon GUI
 --]]
 
 -- // SERVICES // --
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
+local PathfindingService = game:GetService("PathfindingService")
 local TeleportService = game:GetService("TeleportService")
 local VirtualInput = game:GetService("VirtualInput")
 local Lighting = game:GetService("Lighting")
@@ -34,19 +31,26 @@ local ScriptActive = true
 local SliderValue = 40
 local PlayerChar, Humanoid, RootPart
 local Generators = {}
-local CompletedGenerators = {}  -- table of generator parts that are done
+local CompletedGenerators = {}
 local CurrentAction = "Idle"
 local LastGenScan = 0
-local LastMove = 0
+local LastPathTime = 0
 local CurrentMap = "Unknown"
 
 -- // CONSTANTS // --
 local WALK_SPEED = 24
 local GEN_SCAN_INTERVAL = 5
-local MOVEMENT_INTERVAL = 0.3
-local FLEE_COOLDOWN = 0.8
+local FLEE_COOLDOWN = 1.0
+local PATH_OPTIONS = {
+    AgentRadius = 2.0,
+    AgentHeight = 5.0,
+    AgentCanJump = true,
+    AgentMaxSlope = 60,
+    WaypointSpacing = 3.0,
+    Costs = { Water = 100, Dangerous = math.huge }
+}
 
--- // MAP DATABASE (with unique identifiers) // --
+-- // MAP DATABASE // --
 local MapDatabase = {
     ["Brandon6875935's Place"] = { identifiers = {"Castle", "CaveSlope"}, hazards = {} },
     ["Yorick's Resting Place"] = { identifiers = {"YorickHouse", "Graveyard"}, hazards = {"PoisonRiver"} },
@@ -91,7 +95,7 @@ local function updateChar()
     end
 end
 
--- // MAP DETECTION (Improved) // --
+-- // MAP DETECTION // --
 local function detectMap()
     for mapName, data in pairs(MapDatabase) do
         for _, identifier in pairs(data.identifiers) do
@@ -105,10 +109,11 @@ local function detectMap()
     return "Unknown", { hazards = {} }
 end
 
--- // KILLER DETECTION (Any player not in survivor list, plus distance) // --
-local function getNearestKillerDistance()
-    if not RootPart then return math.huge end
-    local nearest = math.huge
+-- // KILLER DETECTION (Any player not in survivor list) // --
+local function getNearestKiller()
+    if not RootPart then return nil, math.huge end
+    local nearestObj = nil
+    local nearestDist = math.huge
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= LP and plr.Character then
             local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
@@ -122,20 +127,23 @@ local function getNearestKillerDistance()
                     for _, s in pairs(SurvivorNames) do
                         if name:find(s) then isKiller = false; break end
                     end
-                    isKiller = true -- any other player is considered threat
+                    if not isKiller then isKiller = true end -- any other player
                 end
                 if plr.Team and plr.Team.Name:lower():find("killer") then isKiller = true end
                 if isKiller then
                     local dist = (RootPart.Position - hrp.Position).magnitude
-                    if dist < nearest then nearest = dist end
+                    if dist < nearestDist then
+                        nearestDist = dist
+                        nearestObj = hrp
+                    end
                 end
             end
         end
     end
-    return nearest
+    return nearestObj, nearestDist
 end
 
--- // GENERATOR SCANNING (Only real generators with ProximityPrompt) // --
+-- // GENERATOR SCANNING // --
 local function scanGenerators()
     local now = tick()
     if now - LastGenScan < GEN_SCAN_INTERVAL then return #Generators end
@@ -157,7 +165,7 @@ local function scanGenerators()
     return #Generators
 end
 
--- // MINIGAME SOLVER (Clicks all numbered buttons or any clickable in the repair frame) // --
+-- // MINIGAME SOLVER (Enhanced) // --
 local function solveMinigame()
     local minigameFrame = nil
     for i = 1, 30 do
@@ -175,14 +183,13 @@ local function solveMinigame()
     end
     if not minigameFrame then return false end
 
-    -- Find all clickable elements (ImageButton, TextButton, or any object with a number)
+    -- Collect all clickable elements that might be dots
     local clickables = {}
     for _, child in pairs(minigameFrame:GetDescendants()) do
         if child.Visible then
             if child:IsA("ImageButton") or child:IsA("TextButton") then
                 table.insert(clickables, child)
             elseif child:IsA("TextLabel") and tonumber(child.Text) then
-                -- If it's a TextLabel with a number, we can simulate click by using its position
                 table.insert(clickables, child)
             end
         end
@@ -206,7 +213,7 @@ local function solveMinigame()
         end
     end)
 
-    -- Click each clickable in sequence
+    -- Click each
     for _, btn in ipairs(clickables) do
         local pos = btn.AbsolutePosition + Vector2.new(btn.AbsoluteSize.X/2, btn.AbsoluteSize.Y/2)
         pcall(function()
@@ -219,14 +226,23 @@ local function solveMinigame()
     return true
 end
 
--- // INTERACT WITH GENERATOR (Hold F, then solve minigame) // --
+-- // INTERACT WITH GENERATOR (Hold F, then prompt, fallback click) // --
 local function interactWithGenerator(gen)
-    -- Hold F key
+    -- Try using ProximityPrompt:Prompt() first (most reliable)
+    local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
+    if prompt then
+        pcall(function()
+            prompt:Prompt()
+        end)
+        task.wait(0.5)
+    end
+
+    -- Hold F key for 2.5 seconds to be sure
     pcall(function()
         VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
     end)
     local uiOpened = false
-    for i = 1, 40 do
+    for i = 1, 35 do
         task.wait(0.1)
         local playerGui = LP:FindFirstChild("PlayerGui")
         if playerGui then
@@ -242,6 +258,32 @@ local function interactWithGenerator(gen)
     pcall(function()
         VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
     end)
+
+    -- If UI still not opened, try clicking the generator part
+    if not uiOpened then
+        local screenPos, onScreen = workspace.CurrentCamera:WorldToScreenPoint(gen.Position)
+        if onScreen then
+            pcall(function()
+                VirtualInput:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, true, game, 0)
+                task.wait(0.2)
+                VirtualInput:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, false, game, 0)
+            end)
+            -- Wait again for UI
+            for i = 1, 20 do
+                task.wait(0.1)
+                local playerGui = LP:FindFirstChild("PlayerGui")
+                if playerGui then
+                    for _, gui in pairs(playerGui:GetDescendants()) do
+                        if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
+                            uiOpened = true
+                            break
+                        end
+                    end
+                end
+                if uiOpened then break end
+            end
+        end
+    end
 
     if uiOpened then
         local solved = solveMinigame()
@@ -269,34 +311,45 @@ local function interactWithGenerator(gen)
     return false
 end
 
--- // OBSTACLE AVOIDANCE (Raycast, throttled) // --
-local function getAvoidedPosition(targetPos)
-    if not RootPart then return targetPos end
-    local direction = (targetPos - RootPart.Position).unit
-    local ray = Ray.new(RootPart.Position, direction * 4)
-    local hit = workspace:FindPartOnRay(ray, PlayerChar)
-    if not hit then return targetPos end
-    -- Try left and right
-    local right = direction:Cross(Vector3.new(0,1,0)).unit
-    local left = -right
-    for _, dir in ipairs({right, left}) do
-        local testPos = RootPart.Position + dir * 3
-        local testRay = Ray.new(RootPart.Position, dir * 3)
-        if not workspace:FindPartOnRay(testRay, PlayerChar) then
-            return testPos
+-- // PATHFINDING MOVE (to a position) // --
+local function pathfindToPosition(targetPos)
+    if not RootPart or not Humanoid then return false end
+    local path = PathfindingService:CreatePath(PATH_OPTIONS)
+    local success = pcall(function()
+        path:ComputeAsync(RootPart.Position, targetPos)
+    end)
+    if not success or path.Status ~= Enum.PathStatus.Success then
+        Humanoid:MoveTo(targetPos)
+        return false
+    end
+    local waypoints = path:GetWaypoints()
+    if #waypoints == 0 then return false end
+    for _, wp in ipairs(waypoints) do
+        if not AIEnabled then break end
+        if wp.Action == Enum.PathWaypointAction.Jump then
+            Humanoid.Jump = true
+            task.wait(0.2)
+        end
+        Humanoid:MoveTo(wp.Position)
+        -- Wait until we reach the waypoint or timeout
+        local start = tick()
+        while (RootPart.Position - wp.Position).magnitude > 3 do
+            if tick() - start > 2 then break end
+            if not AIEnabled then break end
+            task.wait(0.05)
         end
     end
-    return RootPart.Position + direction * 4 -- just keep moving
+    return true
 end
 
--- // SMART MOVEMENT // --
-local function moveToGenerator(gen)
-    if not RootPart or not Humanoid then return end
-    local now = tick()
-    if now - LastMove < MOVEMENT_INTERVAL then return end
-    LastMove = now
-    local targetPos = getAvoidedPosition(gen.Position)
-    Humanoid:MoveTo(targetPos)
+-- // SMART FLEE (pathfind away from killer) // --
+local function fleeFromKiller(killerPos)
+    if not RootPart then return end
+    local awayDir = (RootPart.Position - killerPos).unit
+    local fleePos = RootPart.Position + awayDir * 40
+    -- Clamp to reasonable bounds
+    fleePos = Vector3.new(math.clamp(fleePos.X, -500, 500), fleePos.Y, math.clamp(fleePos.Z, -500, 500))
+    pathfindToPosition(fleePos)
 end
 
 -- // MAIN AI LOOP // --
@@ -308,11 +361,10 @@ local function aiTick()
     end
 
     -- 1. Killer avoidance
-    local killerDist = getNearestKillerDistance()
-    if killerDist <= SliderValue then
+    local killerObj, killerDist = getNearestKiller()
+    if killerObj and killerDist <= SliderValue then
         CurrentAction = "Fleeing"
-        local fleeDir = (RootPart.Position - (RootPart.Position + Vector3.new(1,0,1))).unit
-        Humanoid:MoveTo(RootPart.Position + fleeDir * 35)
+        fleeFromKiller(killerObj.Position)
         task.wait(FLEE_COOLDOWN)
         return
     end
@@ -338,7 +390,7 @@ local function aiTick()
     if nearestGen then
         if nearestDist > 5 then
             CurrentAction = string.format("Moving to generator (%d studs)", nearestDist)
-            moveToGenerator(nearestGen)
+            pathfindToPosition(nearestGen.Position)
         else
             CurrentAction = "Repairing"
             local success = interactWithGenerator(nearestGen)
@@ -374,7 +426,7 @@ end
 -- // BACKGROUND LOOPS (Throttled) // --
 task.spawn(function()
     while ScriptActive do
-        task.wait(MOVEMENT_INTERVAL)
+        task.wait(0.5)
         aiTick()
     end
 end)
@@ -638,7 +690,7 @@ local function createHub()
         while ScriptActive and sg do
             task.wait(1)
             if AIEnabled then
-                local kd = getNearestKillerDistance()
+                local _, kd = getNearestKiller()
                 status.Text = string.format("Generators: %d | Killer: %.0f studs | Alert: %d", #Generators, kd, SliderValue)
                 actionDisplay.Text = "Action: " .. CurrentAction
                 mapDisplay.Text = "Map: " .. CurrentMap
@@ -673,4 +725,4 @@ end
 updateChar()
 detectMap()
 createHub()
-print("Forsaken AI Ultimate Edition loaded. Map detection ready. Killer evasion active.")
+print("Pathfinding AI loaded. Generator interaction uses Prompt, F key, and click fallback. Flee uses pathfinding.")
