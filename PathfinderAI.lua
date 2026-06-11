@@ -6,14 +6,15 @@
     ██║     ██║  ██║██║  ██║██████╔╝ ╚████╔╝ ██║  ██║██║ ╚████║╚██████╗███████╗██████╔╝
     ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝   ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═════╝ 
     
-    ADDED: CLOSE & DISABLE button + HIDE button (with show button)
-    XENO READY | MAP AUTO-DETECT | WALL AVOIDANCE
+    LOBBY/DEAD DETECTION: AI ONLY RUNS WHEN ALIVE AND IN MATCH
+    HIDE + CLOSE buttons | XENO READY | WALL AVOIDANCE
 --]]
 
 -- // SERVICES // --
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
 local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 local LP = Players.LocalPlayer
 
 -- // STATE // --
@@ -21,7 +22,8 @@ local AIEnabled = false
 local AISliderValue = 40
 local MovingToTarget = false
 local Fleeing = false
-local ScriptActive = true          -- if false, all loops exit
+local ScriptActive = true
+local WasAliveLastCheck = false   -- to avoid spamming status changes
 
 -- // REFERENCES // --
 local PlayerChar, Humanoid, RootPart
@@ -44,7 +46,47 @@ local function updateChar()
     if PlayerChar then
         Humanoid = PlayerChar:FindFirstChildOfClass("Humanoid")
         RootPart = PlayerChar:FindFirstChild("HumanoidRootPart")
+    else
+        Humanoid = nil
+        RootPart = nil
     end
+end
+
+-- // LOBBY/DEAD DETECTION (returns true if player is alive and in a match) // --
+local function isPlayerAliveAndInMatch()
+    -- 1. No character → dead or not spawned
+    if not PlayerChar or not Humanoid then
+        return false
+    end
+    -- 2. Health check
+    if Humanoid.Health <= 0 then
+        return false
+    end
+    -- 3. Detect lobby by checking for a "Lobby" part (common in Forsaken)
+    --    If a part named "Lobby" exists and player is near it or game state says lobby.
+    local lobbyPart = workspace:FindFirstChild("Lobby") or workspace:FindFirstChild("LobbyArea")
+    if lobbyPart and RootPart then
+        local distToLobby = (RootPart.Position - lobbyPart.Position).magnitude
+        if distToLobby < 100 then  -- if player is near lobby area, consider it lobby
+            return false
+        end
+    end
+    -- 4. Check for a GUI that indicates lobby (common in many games)
+    local playerGui = LP:FindFirstChild("PlayerGui")
+    if playerGui then
+        -- Look for a screen named "LobbyScreen" or "MainMenu"
+        for _, gui in pairs(playerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and (gui.Name:lower():find("lobby") or gui.Name:lower():find("menu") or gui.Name:lower():find("waiting")) then
+                -- If such a GUI is visible, likely in lobby
+                if gui.Enabled then
+                    return false
+                end
+            end
+        end
+    end
+    -- 5. Fallback: if there are no generators detected but the game is supposed to have them, maybe not in match.
+    --    But we'll let the AI loop handle that (it will just do nothing until generators appear).
+    return true
 end
 
 -- // KILLER DETECTION // --
@@ -200,9 +242,20 @@ local function applyStaminaHack()
     end)
 end
 
--- // MAIN AI TICK // --
+-- // MAIN AI TICK (only runs if alive and not in lobby) // --
 local function aiTick()
     if not AIEnabled or not ScriptActive then return end
+    
+    -- Check if player is alive and in a match
+    if not isPlayerAliveAndInMatch() then
+        -- If we were previously moving, stop movement to prevent weird lobby walking
+        if Humanoid then
+            Humanoid:MoveTo(Vector3.new(0,0,0))
+        end
+        return
+    end
+    
+    -- Ensure character references are fresh
     if not PlayerChar or not Humanoid or not RootPart then
         updateChar()
         if not PlayerChar then return end
@@ -257,7 +310,7 @@ local function aiTick()
     end
 end
 
--- // BACKGROUND LOOPS (with exit condition) // --
+-- // BACKGROUND LOOPS (with exit condition and lobby detection inside aiTick) // --
 task.spawn(function()
     while ScriptActive do
         task.wait(0.25)
@@ -268,18 +321,35 @@ end)
 task.spawn(function()
     while ScriptActive do
         task.wait(0.3)
-        if AIEnabled then applyStaminaHack() end
+        if AIEnabled then
+            applyStaminaHack()
+        end
     end
 end)
 
 task.spawn(function()
     while ScriptActive do
         task.wait(4)
-        if AIEnabled then scanGenerators() end
+        if AIEnabled then
+            scanGenerators()
+        end
     end
 end)
 
--- // GUI HUB (with new buttons) // --
+-- // LOBBY/DEAD DETECTION LOOP (optional: update status text) // --
+task.spawn(function()
+    while ScriptActive do
+        task.wait(1)
+        local alive = isPlayerAliveAndInMatch()
+        if not WasAliveLastCheck and alive then
+            -- just became alive, refresh generators
+            scanGenerators()
+        end
+        WasAliveLastCheck = alive
+    end
+end)
+
+-- // GUI HUB (with HIDE and CLOSE buttons) // --
 local function createHub()
     local sg = Instance.new("ScreenGui")
     sg.Name = "AdvancedAIHub"
@@ -287,7 +357,7 @@ local function createHub()
     sg.ResetOnSpawn = false
     
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 400, 0, 300)  -- made a bit taller for extra buttons
+    frame.Size = UDim2.new(0, 400, 0, 300)
     frame.Position = UDim2.new(0.5, -200, 0.5, -150)
     frame.BackgroundColor3 = Color3.fromRGB(8, 8, 18)
     frame.BackgroundTransparency = 0.2
@@ -385,7 +455,6 @@ local function createHub()
         end
     end)
     
-    -- Status label
     local status = Instance.new("TextLabel")
     status.Size = UDim2.new(1, -20, 0, 35)
     status.Position = UDim2.new(0, 10, 0, 175)
@@ -397,7 +466,7 @@ local function createHub()
     status.TextXAlignment = Enum.TextXAlignment.Left
     status.Parent = frame
     
-    -- NEW BUTTONS: HIDE and CLOSE & DISABLE
+    -- HIDE button
     local hideBtn = Instance.new("TextButton")
     hideBtn.Size = UDim2.new(0, 90, 0, 35)
     hideBtn.Position = UDim2.new(0.05, 0, 0, 235)
@@ -409,6 +478,7 @@ local function createHub()
     hideBtn.Parent = frame
     Instance.new("UICorner").CornerRadius = UDim.new(0, 6); Instance.new("UICorner").Parent = hideBtn
     
+    -- CLOSE & DISABLE button
     local closeBtn = Instance.new("TextButton")
     closeBtn.Size = UDim2.new(0, 130, 0, 35)
     closeBtn.Position = UDim2.new(0.5, -65, 0, 235)
@@ -420,17 +490,14 @@ local function createHub()
     closeBtn.Parent = frame
     Instance.new("UICorner").CornerRadius = UDim.new(0, 6); Instance.new("UICorner").Parent = closeBtn
     
-    -- Show button (initially hidden) - appears when HIDE is pressed
     local showBtn = nil
     
-    -- HIDE functionality
     hideBtn.MouseButton1Click:Connect(function()
         frame.Visible = false
-        -- Create a small floating "Show" button if not already present
         if not showBtn then
             showBtn = Instance.new("TextButton")
             showBtn.Size = UDim2.new(0, 100, 0, 30)
-            showBtn.Position = UDim2.new(0.02, 0, 0.9, 0)   -- bottom left corner
+            showBtn.Position = UDim2.new(0.02, 0, 0.9, 0)
             showBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 200)
             showBtn.Text = "🔽 SHOW MENU"
             showBtn.TextColor3 = Color3.new(1,1,1)
@@ -438,7 +505,6 @@ local function createHub()
             showBtn.TextSize = 12
             showBtn.Parent = sg
             Instance.new("UICorner").CornerRadius = UDim.new(0, 8); Instance.new("UICorner").Parent = showBtn
-            
             showBtn.MouseButton1Click:Connect(function()
                 frame.Visible = true
                 showBtn:Destroy()
@@ -447,34 +513,11 @@ local function createHub()
         end
     end)
     
-    -- CLOSE & DISABLE: stops AI, kills loops, destroys GUI
     closeBtn.MouseButton1Click:Connect(function()
         AIEnabled = false
-        ScriptActive = false   -- this will break all background loops
-        -- Destroy the entire GUI (including any show button)
+        ScriptActive = false
         sg:Destroy()
-        -- Optionally print a message
         print("🔴 AI and script fully disabled. Menu closed.")
-    end)
-    
-    -- Slider drag logic (same as before)
-    knob.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            local moveConn, endConn
-            moveConn = UserInputService.InputChanged:Connect(function(io)
-                if io.UserInputType == Enum.UserInputType.MouseMovement then
-                    local relX = math.clamp(io.Position.X - sliderBg.AbsolutePosition.X, 0, sliderBg.AbsoluteSize.X)
-                    local newVal = math.floor((relX / sliderBg.AbsoluteSize.X) * 100)
-                    setSliderValue(newVal)
-                end
-            end)
-            endConn = UserInputService.InputEnded:Connect(function(io)
-                if io.UserInputType == Enum.UserInputType.MouseButton1 then
-                    moveConn:Disconnect()
-                    endConn:Disconnect()
-                end
-            end)
-        end
     end)
     
     toggle.MouseButton1Click:Connect(function()
@@ -484,7 +527,7 @@ local function createHub()
             toggle.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
             updateChar()
             scanGenerators()
-            status.Text = "AI ACTIVE | Pathfinding around walls | Stamina hacked"
+            status.Text = "AI ACTIVE | Will run only when alive"
         else
             toggle.Text = "🔴 AI OFF"
             toggle.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
@@ -492,25 +535,29 @@ local function createHub()
         end
     end)
     
-    -- Status updater
+    -- Status updater (shows alive/lobby state)
     task.spawn(function()
         while ScriptActive and sg and sg.Parent do
-            task.wait(1.5)
+            task.wait(1)
             if AIEnabled then
-                local killer = findKiller()
-                local distText = ""
-                if killer and RootPart then
-                    local kr = killer:FindFirstChild("HumanoidRootPart")
-                    if kr then
-                        local d = (RootPart.Position - kr.Position).magnitude
-                        distText = string.format(" | Killer: %.1f studs", d)
+                local alive = isPlayerAliveAndInMatch()
+                local stateText = alive and "🔵 ALIVE" or "⚫ LOBBY/DEAD"
+                local killerInfo = ""
+                if alive then
+                    local killer = findKiller()
+                    if killer and RootPart then
+                        local kr = killer:FindFirstChild("HumanoidRootPart")
+                        if kr then
+                            local d = (RootPart.Position - kr.Position).magnitude
+                            killerInfo = string.format(" | Killer: %.1f", d)
+                        else
+                            killerInfo = " | Killer: near"
+                        end
                     else
-                        distText = " | Killer: near"
+                        killerInfo = " | Killer: none"
                     end
-                else
-                    distText = " | Killer: none"
                 end
-                status.Text = string.format("Gens: %d%s | Alert: %d", #Generators, distText, AISliderValue)
+                status.Text = string.format("Gens: %d %s%s | Alert: %d", #Generators, stateText, killerInfo, AISliderValue)
             end
         end
     end)
@@ -540,7 +587,9 @@ updateChar()
 LP.CharacterAdded:Connect(function()
     task.wait(0.3)
     updateChar()
-    if AIEnabled then scanGenerators() end
+    if AIEnabled then
+        scanGenerators()
+    end
 end)
 createHub()
-print("✅ Advanced AI Pathfinder (with HIDE and CLOSE buttons) loaded. Xeno ready.")
+print("✅ Advanced AI Pathfinder with lobby/dead detection loaded. AI only runs when alive and in match. Xeno ready.")
