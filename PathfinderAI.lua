@@ -1,9 +1,9 @@
 --[[
-    FORSAKEN AI – SIMPLIFIED & RELIABLE
-    - Any other player = killer (distance only)
-    - Hold F at generator for 2 seconds
-    - Brute‑force minigame solver (clicks all buttons)
-    - No wall/hazard checks (no freezing)
+    FORSAKEN AI – FINAL RELIABLE VERSION
+    - Only real generators (name contains "Generator")
+    - Killer detection by name/team (fallback any player)
+    - Simple straight movement (no wall avoidance to prevent freeze)
+    - Minigame solver clicks all buttons in order
 --]]
 
 -- // SERVICES // --
@@ -74,60 +74,75 @@ end
 
 -- // LOBBY DETECTION // --
 local function isRoundActive()
-    -- Check for lobby GUI or round timer text
     local playerGui = LP:FindFirstChild("PlayerGui")
     if playerGui then
         for _, label in pairs(playerGui:GetDescendants()) do
-            if label:IsA("TextLabel") then
-                local text = label.Text
-                if text:find("Round begins") or text:find("Time left") then
-                    return true
-                end
+            if label:IsA("TextLabel") and label.Text:find("Round begins") then
+                return true
             end
         end
     end
-    -- If no round timer, assume lobby if character not fully spawned
-    if not PlayerChar or not Humanoid or Humanoid.Health <= 0 then
-        return false
-    end
-    return true
+    return (PlayerChar and Humanoid and Humanoid.Health > 0)
 end
 
--- // KILLER DETECTION (any other player) // --
-local function getNearestKillerDistance()
-    if not RootPart then return math.huge end
-    local nearest = math.huge
+-- // KILLER DETECTION (prioritize real killers) // --
+local function getNearestKiller()
+    if not RootPart then return nil, math.huge end
+    local nearest = nil
+    local nearestDist = math.huge
+    local anyPlayerDist = math.huge
+    local anyPlayer = nil
+
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= LP and plr.Character then
             local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
             if hrp then
-                local d = (RootPart.Position - hrp.Position).magnitude
-                if d < nearest then
-                    nearest = d
+                local dist = (RootPart.Position - hrp.Position).magnitude
+                -- Keep track of any other player as fallback
+                if dist < anyPlayerDist then
+                    anyPlayerDist = dist
+                    anyPlayer = hrp
+                end
+                -- Check if this is a killer
+                local isKiller = false
+                if plr.Team and plr.Team.Name:lower():find("killer") then isKiller = true end
+                if not isKiller and plr.Name:lower():find("killer") then isKiller = true end
+                if not isKiller and plr.Character:FindFirstChild("KillerTag") then isKiller = true end
+                if isKiller and dist < nearestDist then
+                    nearestDist = dist
+                    nearest = hrp
                 end
             end
         end
     end
-    return nearest
+    -- If no killer found, fallback to any other player (so you at least run from survivors)
+    if not nearest and anyPlayer then
+        return anyPlayer, anyPlayerDist
+    end
+    return nearest, nearestDist
 end
 
--- // GENERATOR SCANNING (ProximityPrompt parents) // --
+-- // GENERATOR SCANNING (only parts with "Generator" in name or parent name) // --
 local function scanGenerators()
     local newGens = {}
     for _, prompt in pairs(workspace:GetDescendants()) do
         if prompt:IsA("ProximityPrompt") and prompt.Parent then
             local part = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart")
-            if part and not table.find(CompletedGenerators, part) then
-                table.insert(newGens, part)
+            if part then
+                local name = part.Name:lower()
+                local parentName = part.Parent and part.Parent.Name:lower() or ""
+                if (name:find("generator") or parentName:find("generator")) and not table.find(CompletedGenerators, part) then
+                    table.insert(newGens, part)
+                end
             end
         end
     end
     Generators = newGens
-    updateDebug(string.format("Found %d generators", #Generators))
+    updateDebug(string.format("Found %d real generators", #Generators))
     return #Generators
 end
 
--- // BRUTE‑FORCE MINIGAME SOLVER // --
+-- // MINIGAME SOLVER (clicks every button in the minigame frame) // --
 local function solveMinigame()
     local minigameFrame = nil
     for i = 1, 30 do
@@ -169,7 +184,7 @@ local function solveMinigame()
         end
     end)
 
-    -- Click each one in sequence
+    -- Click each button in sequence
     for _, btn in ipairs(clickables) do
         local pos = btn.AbsolutePosition + Vector2.new(btn.AbsoluteSize.X/2, btn.AbsoluteSize.Y/2)
         pcall(function()
@@ -179,35 +194,35 @@ local function solveMinigame()
         end)
         task.wait(0.1)
     end
-    updateDebug("Minigame solver clicked " .. #clickables .. " elements")
+    updateDebug("Minigame solved (" .. #clickables .. " buttons clicked)")
     return true
 end
 
--- // INTERACT WITH GENERATOR (hold F for 2 seconds, then solve) // --
+-- // INTERACT WITH GENERATOR (hold F until minigame appears) // --
 local function interactWithGenerator(gen)
     updateDebug("Interacting with generator: " .. gen.Name)
-    -- Simulate holding F key
     pcall(function()
         VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
     end)
-    task.wait(2)  -- hold for 2 seconds
+    local uiOpened = false
+    for i = 1, 30 do
+        task.wait(0.1)
+        local playerGui = LP:FindFirstChild("PlayerGui")
+        if playerGui then
+            for _, gui in pairs(playerGui:GetDescendants()) do
+                if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
+                    uiOpened = true
+                    break
+                end
+            end
+        end
+        if uiOpened then break end
+    end
     pcall(function()
         VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
     end)
 
-    -- Check if minigame opened
-    local playerGui = LP:FindFirstChild("PlayerGui")
-    local minigameOpened = false
-    if playerGui then
-        for _, gui in pairs(playerGui:GetDescendants()) do
-            if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                minigameOpened = true
-                break
-            end
-        end
-    end
-
-    if minigameOpened then
+    if uiOpened then
         updateDebug("Minigame opened – solving")
         local solved = solveMinigame()
         if solved then
@@ -215,6 +230,7 @@ local function interactWithGenerator(gen)
             for i = 1, 30 do
                 task.wait(0.3)
                 local found = false
+                local playerGui = LP:FindFirstChild("PlayerGui")
                 if playerGui then
                     for _, gui in pairs(playerGui:GetDescendants()) do
                         if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
@@ -236,6 +252,20 @@ local function interactWithGenerator(gen)
     return false
 end
 
+-- // SIMPLE MOVE (no wall avoidance, just straight line with timeout) // --
+local function moveToPosition(targetPos)
+    if not RootPart or not Humanoid then return end
+    Humanoid:MoveTo(targetPos)
+    -- Wait up to 2 seconds to see if we're stuck
+    local start = tick()
+    while tick() - start < 2 do
+        task.wait(0.2)
+        if (RootPart.Position - targetPos).magnitude < 4 then
+            break
+        end
+    end
+end
+
 -- // MAIN AI LOOP // --
 local function aiTick()
     if not AIEnabled or not ScriptActive then return end
@@ -253,31 +283,16 @@ local function aiTick()
         return
     end
 
-    -- 1. Killer avoidance (any other player)
-    local killerDist = getNearestKillerDistance()
-    if killerDist <= SliderValue then
+    -- 1. Killer avoidance
+    local killerObj, killerDist = getNearestKiller()
+    if killerObj and killerDist <= SliderValue then
         CurrentAction = string.format("Fleeing (killer %.0f studs)", killerDist)
         local now = tick()
         if now - LastFleeTime > 0.8 then
             LastFleeTime = now
-            -- Flee in opposite direction
-            local killerPos = nil
-            for _, plr in pairs(Players:GetPlayers()) do
-                if plr ~= LP and plr.Character then
-                    local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
-                    if hrp and (RootPart.Position - hrp.Position).magnitude == killerDist then
-                        killerPos = hrp.Position
-                        break
-                    end
-                end
-            end
-            if killerPos then
-                local away = (RootPart.Position - killerPos).unit
-                local fleePos = RootPart.Position + away * 40
-                Humanoid:MoveTo(fleePos)
-            else
-                Humanoid:MoveTo(RootPart.Position + Vector3.new(10,0,10))
-            end
+            local away = (RootPart.Position - killerObj.Position).unit
+            local fleePos = RootPart.Position + away * 40
+            moveToPosition(fleePos)
         end
         return
     end
@@ -285,7 +300,7 @@ local function aiTick()
     -- 2. Generator farming
     if #Generators == 0 then
         scanGenerators()
-        if #Generators == 0 then return end
+        return
     end
 
     local nearestGen = nil
@@ -303,7 +318,7 @@ local function aiTick()
     if nearestGen then
         if nearestDist > 5 then
             CurrentAction = string.format("Moving to generator (%.0f studs)", nearestDist)
-            Humanoid:MoveTo(nearestGen.Position)
+            moveToPosition(nearestGen.Position)
         else
             CurrentAction = "Interacting"
             interactWithGenerator(nearestGen)
@@ -323,7 +338,6 @@ local function applyStamina()
         setreadonly(staminaProp, true)
     end
     Humanoid:SetAttribute("Sprinting", true)
-    -- Remove blur
     for _, effect in pairs(game:GetService("Lighting"):GetChildren()) do
         if effect:IsA("BlurEffect") then effect.Enabled = false end
     end
@@ -369,7 +383,7 @@ local function createHub()
     local title = Instance.new("TextLabel")
     title.Size = UDim2.new(1,0,0,35)
     title.BackgroundTransparency = 1
-    title.Text = "⚡ FORSAKEN AI (SIMPLIFIED) ⚡"
+    title.Text = "⚡ FORSAKEN AI (FINAL) ⚡"
     title.TextColor3 = Color3.fromRGB(0,200,255)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 15
@@ -525,7 +539,6 @@ local function createHub()
         ScriptActive = false
         sg:Destroy()
         if debugSG then debugSG:Destroy() end
-        updateDebug = function() end
         print("AI script fully unloaded.")
     end)
 
@@ -536,7 +549,7 @@ local function createHub()
             toggle.BackgroundColor3 = Color3.fromRGB(0,180,80)
             updateChar()
             scanGenerators()
-            updateDebug("AI enabled – simplified mode")
+            updateDebug("AI enabled – final reliable version")
         else
             toggle.Text = "🔴 AI OFF"
             toggle.BackgroundColor3 = Color3.fromRGB(0,120,200)
@@ -548,7 +561,7 @@ local function createHub()
         while ScriptActive and sg do
             task.wait(2)
             if AIEnabled then
-                local kd = getNearestKillerDistance()
+                local _, kd = getNearestKiller()
                 status.Text = string.format("Gens: %d | Killer: %.0f studs | Alert: %d", #Generators, kd, SliderValue)
             else
                 status.Text = "AI OFF"
@@ -584,4 +597,4 @@ LP.CharacterAdded:Connect(function()
     if AIEnabled then scanGenerators() end
 end)
 createHub()
-updateDebug("Simplified AI loaded. Any other player = killer. Hold F for 2s at generator. Brute‑force minigame solver.")
+updateDebug("Final AI loaded. Only generators with 'Generator' in name. Killer detection by name/team (fallback any player).")
