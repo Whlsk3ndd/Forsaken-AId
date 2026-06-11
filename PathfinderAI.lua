@@ -1,12 +1,13 @@
 --[[
-    ██████╗ ██████╗ █████╗ ██████╗ ██╗ ██╗ █████╗ ███╗ ██╗ ██████╗███████╗██████╗ 
-    ██╔══██╗██╔══██╗██╔══██╗██╔══██╗██║ ██║██╔══██╗████╗ ██║██╔════╝██╔════╝██╔══██╗
-    ██████╔╝██████╔╝███████║██║ ██║██║ ██║███████║██╔██╗ ██║██║ █████╗ ██║ ██║
-    ██╔═══╝ ██╔══██╗██╔══██║██║ ██║╚██╗ ██╔╝██╔══██║██║╚██╗██║██║ ██╔══╝ ██║ ██║
-    ██║ ██║ ██║██║ ██║██████╔╝ ╚████╔╝ ██║ ██║██║ ╚████║╚██████╗███████╗██████╔╝
-    ╚═╝ ╚═╝ ╚═╝╚═╝ ╚═╝╚═════╝ ╚═══╝ ╚═╝ ╚═╝╚═╝ ╚═══╝ ╚═════╝╚══════╝╚═════╝ 
+    ██████╗ ██████╗  █████╗ ██████╗ ██╗   ██╗ █████╗ ███╗   ██╗ ██████╗███████╗██████╗ 
+    ██╔══██╗██╔══██╗██╔══██╗██╔══██╗██║   ██║██╔══██╗████╗  ██║██╔════╝██╔════╝██╔══██╗
+    ██████╔╝██████╔╝███████║██║  ██║██║   ██║███████║██╔██╗ ██║██║     █████╗  ██║  ██║
+    ██╔═══╝ ██╔══██╗██╔══██║██║  ██║╚██╗ ██╔╝██╔══██║██║╚██╗██║██║     ██╔══╝  ██║  ██║
+    ██║     ██║  ██║██║  ██║██████╔╝ ╚████╔╝ ██║  ██║██║ ╚████║╚██████╗███████╗██████╔╝
+    ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝   ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═════╝ 
     
-    KILLER RADIUS BASED ON SLIDER | TRUE PATHFINDING AROUND WALLS | XENO READY
+    ADDED: CLOSE & DISABLE button + HIDE button (with show button)
+    XENO READY | MAP AUTO-DETECT | WALL AVOIDANCE
 --]]
 
 -- // SERVICES // --
@@ -17,11 +18,10 @@ local LP = Players.LocalPlayer
 
 -- // STATE // --
 local AIEnabled = false
-local AISliderValue = 40 -- 0 = flee only when killer is right on you, 100 = flee within 100 studs
+local AISliderValue = 40
 local MovingToTarget = false
-local CurrentPath = nil
-local LastPathTime = 0
 local Fleeing = false
+local ScriptActive = true          -- if false, all loops exit
 
 -- // REFERENCES // --
 local PlayerChar, Humanoid, RootPart
@@ -30,7 +30,7 @@ local KillerModel = nil
 
 -- // PATHFINDING CONFIG // --
 local PATH_OPTIONS = {
-    AgentRadius = 2.5, -- slightly wider to avoid tight corners
+    AgentRadius = 2.5,
     AgentHeight = 5,
     AgentCanJump = true,
     AgentMaxSlope = 60,
@@ -47,13 +47,12 @@ local function updateChar()
     end
 end
 
--- // REAL KILLER DETECTION (with team/name check) // --
+-- // KILLER DETECTION // --
 local function findKiller()
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= LP and plr.Character then
             local char = plr.Character
             if char:FindFirstChild("HumanoidRootPart") then
-                -- Check team or name
                 if (plr.Team and (plr.Team.Name:lower():find("killer") or plr.Team.Name:lower():find("monster"))) or
                    (plr.Name:lower():find("killer") or plr.DisplayName:lower():find("killer")) then
                     return char
@@ -61,7 +60,6 @@ local function findKiller()
             end
         end
     end
-    -- Fallback: scan workspace for NPC killers
     for _, obj in pairs(workspace:GetDescendants()) do
         if obj:IsA("Model") and obj:FindFirstChild("Humanoid") and obj:FindFirstChild("HumanoidRootPart") then
             local name = obj.Name:lower()
@@ -73,10 +71,9 @@ local function findKiller()
     return nil
 end
 
--- // SMART FLEE: find a point away from killer that is reachable via pathfinding // --
+-- // SMART FLEE POSITION // --
 local function getFleePosition(killerPos, myPos)
     local direction = (myPos - killerPos).unit
-    -- Try multiple angles to find a safe point (in case straight back is blocked)
     for angle = 0, 360, 45 do
         local rad = math.rad(angle)
         local testDir = Vector3.new(
@@ -84,11 +81,8 @@ local function getFleePosition(killerPos, myPos)
             0,
             direction.X * math.sin(rad) + direction.Z * math.cos(rad)
         ).unit
-        local fleePos = myPos + testDir * 40 -- flee 40 studs away
-        -- Clamp to map bounds (assume -500 to 500 range)
+        local fleePos = myPos + testDir * 40
         fleePos = Vector3.new(math.clamp(fleePos.X, -500, 500), fleePos.Y, math.clamp(fleePos.Z, -500, 500))
-        
-        -- Quick check if this point is reachable using a cheap path test
         local testPath = PathfindingService:CreatePath(PATH_OPTIONS)
         local success = pcall(function()
             testPath:ComputeAsync(myPos, fleePos)
@@ -97,11 +91,10 @@ local function getFleePosition(killerPos, myPos)
             return fleePos
         end
     end
-    -- Fallback: just move straight back
     return myPos + direction * 40
 end
 
--- // PATHFINDING MOVE (with waypoint following, jumps, and dynamic re-pathing) // --
+-- // PATHFINDING MOVE // --
 local function moveToPosition(targetPos)
     if not RootPart or not Humanoid or MovingToTarget then return false end
     local path = PathfindingService:CreatePath(PATH_OPTIONS)
@@ -109,7 +102,6 @@ local function moveToPosition(targetPos)
         path:ComputeAsync(RootPart.Position, targetPos)
     end)
     if not success or path.Status ~= Enum.PathStatus.Success then
-        -- No path found – fallback to straight line (rare)
         Humanoid:MoveTo(targetPos)
         return false
     end
@@ -118,22 +110,18 @@ local function moveToPosition(targetPos)
     if #waypoints == 0 then return false end
     
     MovingToTarget = true
-    for i, waypoint in ipairs(waypoints) do
-        if not AIEnabled then break end
+    for _, waypoint in ipairs(waypoints) do
+        if not AIEnabled or not ScriptActive then break end
         if not RootPart or not Humanoid then break end
-        
-        -- Jump if needed
         if waypoint.Action == Enum.PathWaypointAction.Jump then
             Humanoid.Jump = true
             task.wait(0.1)
         end
-        
         Humanoid:MoveTo(waypoint.Position)
-        -- Wait until we reach the waypoint or timeout
         local startTime = tick()
         while (RootPart.Position - waypoint.Position).magnitude > 3 do
-            if tick() - startTime > 2 then break end -- stuck, abort this path
-            if not AIEnabled then break end
+            if tick() - startTime > 2 then break end
+            if not AIEnabled or not ScriptActive then break end
             task.wait(0.05)
         end
     end
@@ -141,7 +129,7 @@ local function moveToPosition(targetPos)
     return true
 end
 
--- // GENERATOR SCANNER (auto-detect any interactive object) // --
+-- // GENERATOR SCANNER // --
 local function scanGenerators()
     local newGens = {}
     for _, prompt in pairs(workspace:GetDescendants()) do
@@ -152,7 +140,6 @@ local function scanGenerators()
             end
         end
     end
-    -- Also include any part named generator
     for _, part in pairs(workspace:GetDescendants()) do
         if part:IsA("BasePart") and part.Name:lower():find("generator") then
             if not table.find(newGens, part) then
@@ -164,34 +151,43 @@ local function scanGenerators()
     return #Generators
 end
 
--- // INTERACT WITH GENERATOR // --
+-- // CORRECT GENERATOR INTERACTION // --
 local function interactWithGenerator(gen)
     local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
     if prompt then
-        prompt:InputHoldStart()
-        task.wait(0.2)
-        prompt:InputHoldEnd()
-    else
-        local click = gen:FindFirstChildWhichIsA("ClickDetector")
-        if click then click:FireClick(RootPart) end
+        pcall(function()
+            prompt:Prompt()
+        end)
+        return
+    end
+    local click = gen:FindFirstChildWhichIsA("ClickDetector")
+    if click and RootPart then
+        pcall(function()
+            click:FireClick(RootPart)
+        end)
+        return
+    end
+    local remote = gen.Parent:FindFirstChild("GenerateRemote") or 
+                   game:GetService("ReplicatedStorage"):FindFirstChild("Generate")
+    if remote and remote:IsA("RemoteEvent") then
+        pcall(function()
+            remote:FireServer(gen)
+        end)
     end
 end
 
--- // INFINITE STAMINA HACK (Xeno) // --
+-- // STAMINA HACK (XENO) // --
 local function applyStaminaHack()
     if not Humanoid then return end
-    -- Method 1: Override Humanoid.Stamina property if exists
     local staminaProp = Humanoid:FindFirstChild("Stamina")
     if staminaProp and staminaProp:IsA("NumberValue") then
         setreadonly(staminaProp, false)
         staminaProp.Value = 100
         setreadonly(staminaProp, true)
     end
-    -- Method 2: Force sprint attribute
     if Humanoid.Sprint then
         Humanoid.Sprint = true
     end
-    -- Method 3: Hook the stamina deduction function (advanced)
     pcall(function()
         local mt = getrawmetatable(Humanoid)
         if mt and mt.__index then
@@ -204,32 +200,27 @@ local function applyStaminaHack()
     end)
 end
 
--- // MAIN AI DECISION (called every 0.25s) // --
+-- // MAIN AI TICK // --
 local function aiTick()
-    if not AIEnabled then return end
+    if not AIEnabled or not ScriptActive then return end
     if not PlayerChar or not Humanoid or not RootPart then
         updateChar()
         if not PlayerChar then return end
     end
     
-    -- 1. Check killer distance (using slider value as radius)
+    -- Killer avoidance
     KillerModel = findKiller()
-    local killerDist = nil
     if KillerModel and RootPart then
         local killerRoot = KillerModel:FindFirstChild("HumanoidRootPart")
         if killerRoot then
-            killerDist = (RootPart.Position - killerRoot.Position).magnitude
-            -- If killer is within slider radius -> FLEE
-            if killerDist <= AISliderValue then
+            local dist = (RootPart.Position - killerRoot.Position).magnitude
+            if dist <= AISliderValue then
                 if not Fleeing then
                     local fleePos = getFleePosition(killerRoot.Position, RootPart.Position)
                     moveToPosition(fleePos)
                     Fleeing = true
-                else
-                    -- Already fleeing, continue moving to the last flee target
-                    -- We'll let the movement continue
                 end
-                return -- flee is highest priority
+                return
             else
                 Fleeing = false
             end
@@ -238,7 +229,7 @@ local function aiTick()
         Fleeing = false
     end
     
-    -- 2. No killer nearby -> go to nearest generator (with pathfinding)
+    -- Generator farming
     if #Generators == 0 then
         scanGenerators()
         return
@@ -266,33 +257,29 @@ local function aiTick()
     end
 end
 
--- // BACKGROUND LOOPS (THROTTLED FOR PERFORMANCE) // --
+-- // BACKGROUND LOOPS (with exit condition) // --
 task.spawn(function()
-    while true do
-        task.wait(0.25) -- AI decision every 250ms
+    while ScriptActive do
+        task.wait(0.25)
         aiTick()
     end
 end)
 
 task.spawn(function()
-    while true do
+    while ScriptActive do
         task.wait(0.3)
-        if AIEnabled then
-            applyStaminaHack()
-        end
+        if AIEnabled then applyStaminaHack() end
     end
 end)
 
 task.spawn(function()
-    while true do
+    while ScriptActive do
         task.wait(4)
-        if AIEnabled then
-            scanGenerators()
-        end
+        if AIEnabled then scanGenerators() end
     end
 end)
 
--- // COOL GUI HUB (WITH SLIDER) // --
+-- // GUI HUB (with new buttons) // --
 local function createHub()
     local sg = Instance.new("ScreenGui")
     sg.Name = "AdvancedAIHub"
@@ -300,8 +287,8 @@ local function createHub()
     sg.ResetOnSpawn = false
     
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 340, 0, 260)
-    frame.Position = UDim2.new(0.5, -170, 0.5, -130)
+    frame.Size = UDim2.new(0, 400, 0, 300)  -- made a bit taller for extra buttons
+    frame.Position = UDim2.new(0.5, -200, 0.5, -150)
     frame.BackgroundColor3 = Color3.fromRGB(8, 8, 18)
     frame.BackgroundTransparency = 0.2
     frame.BorderSizePixel = 0
@@ -323,7 +310,7 @@ local function createHub()
     
     local toggle = Instance.new("TextButton")
     toggle.Size = UDim2.new(0, 200, 0, 45)
-    toggle.Position = UDim2.new(0.5, -100, 0, 55)
+    toggle.Position = UDim2.new(0.5, -100, 0, 50)
     toggle.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
     toggle.Text = "🔴 AI OFF"
     toggle.TextColor3 = Color3.new(1,1,1)
@@ -332,9 +319,10 @@ local function createHub()
     toggle.Parent = frame
     Instance.new("UICorner").CornerRadius = UDim.new(0, 8); Instance.new("UICorner").Parent = toggle
     
+    -- Slider
     local sliderFrame = Instance.new("Frame")
     sliderFrame.Size = UDim2.new(0, 280, 0, 50)
-    sliderFrame.Position = UDim2.new(0.5, -140, 0, 115)
+    sliderFrame.Position = UDim2.new(0.5, -140, 0, 110)
     sliderFrame.BackgroundTransparency = 1
     sliderFrame.Parent = frame
     
@@ -368,17 +356,6 @@ local function createHub()
     knob.Parent = sliderFrame
     Instance.new("UICorner").CornerRadius = UDim.new(1,0); Instance.new("UICorner").Parent = knob
     
-    local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -20, 0, 35)
-    status.Position = UDim2.new(0, 10, 0, 190)
-    status.BackgroundTransparency = 1
-    status.Text = "Ready"
-    status.TextColor3 = Color3.fromRGB(200, 200, 230)
-    status.Font = Enum.Font.Gotham
-    status.TextSize = 12
-    status.TextXAlignment = Enum.TextXAlignment.Left
-    status.Parent = frame
-    
     local function setSliderValue(val)
         val = math.clamp(val, 0, 100)
         AISliderValue = val
@@ -389,6 +366,98 @@ local function createHub()
     end
     setSliderValue(40)
     
+    knob.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            local moveConn, endConn
+            moveConn = UserInputService.InputChanged:Connect(function(io)
+                if io.UserInputType == Enum.UserInputType.MouseMovement then
+                    local relX = math.clamp(io.Position.X - sliderBg.AbsolutePosition.X, 0, sliderBg.AbsoluteSize.X)
+                    local newVal = math.floor((relX / sliderBg.AbsoluteSize.X) * 100)
+                    setSliderValue(newVal)
+                end
+            end)
+            endConn = UserInputService.InputEnded:Connect(function(io)
+                if io.UserInputType == Enum.UserInputType.MouseButton1 then
+                    moveConn:Disconnect()
+                    endConn:Disconnect()
+                end
+            end)
+        end
+    end)
+    
+    -- Status label
+    local status = Instance.new("TextLabel")
+    status.Size = UDim2.new(1, -20, 0, 35)
+    status.Position = UDim2.new(0, 10, 0, 175)
+    status.BackgroundTransparency = 1
+    status.Text = "Ready"
+    status.TextColor3 = Color3.fromRGB(200, 200, 230)
+    status.Font = Enum.Font.Gotham
+    status.TextSize = 12
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.Parent = frame
+    
+    -- NEW BUTTONS: HIDE and CLOSE & DISABLE
+    local hideBtn = Instance.new("TextButton")
+    hideBtn.Size = UDim2.new(0, 90, 0, 35)
+    hideBtn.Position = UDim2.new(0.05, 0, 0, 235)
+    hideBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
+    hideBtn.Text = "⛔ HIDE"
+    hideBtn.TextColor3 = Color3.new(1,1,1)
+    hideBtn.Font = Enum.Font.GothamBold
+    hideBtn.TextSize = 14
+    hideBtn.Parent = frame
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 6); Instance.new("UICorner").Parent = hideBtn
+    
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 130, 0, 35)
+    closeBtn.Position = UDim2.new(0.5, -65, 0, 235)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 60)
+    closeBtn.Text = "🔴 CLOSE & DISABLE"
+    closeBtn.TextColor3 = Color3.new(1,1,1)
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 13
+    closeBtn.Parent = frame
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 6); Instance.new("UICorner").Parent = closeBtn
+    
+    -- Show button (initially hidden) - appears when HIDE is pressed
+    local showBtn = nil
+    
+    -- HIDE functionality
+    hideBtn.MouseButton1Click:Connect(function()
+        frame.Visible = false
+        -- Create a small floating "Show" button if not already present
+        if not showBtn then
+            showBtn = Instance.new("TextButton")
+            showBtn.Size = UDim2.new(0, 100, 0, 30)
+            showBtn.Position = UDim2.new(0.02, 0, 0.9, 0)   -- bottom left corner
+            showBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 200)
+            showBtn.Text = "🔽 SHOW MENU"
+            showBtn.TextColor3 = Color3.new(1,1,1)
+            showBtn.Font = Enum.Font.GothamBold
+            showBtn.TextSize = 12
+            showBtn.Parent = sg
+            Instance.new("UICorner").CornerRadius = UDim.new(0, 8); Instance.new("UICorner").Parent = showBtn
+            
+            showBtn.MouseButton1Click:Connect(function()
+                frame.Visible = true
+                showBtn:Destroy()
+                showBtn = nil
+            end)
+        end
+    end)
+    
+    -- CLOSE & DISABLE: stops AI, kills loops, destroys GUI
+    closeBtn.MouseButton1Click:Connect(function()
+        AIEnabled = false
+        ScriptActive = false   -- this will break all background loops
+        -- Destroy the entire GUI (including any show button)
+        sg:Destroy()
+        -- Optionally print a message
+        print("🔴 AI and script fully disabled. Menu closed.")
+    end)
+    
+    -- Slider drag logic (same as before)
     knob.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             local moveConn, endConn
@@ -425,7 +494,7 @@ local function createHub()
     
     -- Status updater
     task.spawn(function()
-        while true do
+        while ScriptActive and sg and sg.Parent do
             task.wait(1.5)
             if AIEnabled then
                 local killer = findKiller()
@@ -446,7 +515,7 @@ local function createHub()
         end
     end)
     
-    -- Dragging
+    -- Draggable title
     local dragStart, dragPos, dragging = nil
     title.InputBegan:Connect(function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -468,10 +537,10 @@ end
 
 -- // INIT // --
 updateChar()
-LP.CharacterAdded:Connect(function(char)
+LP.CharacterAdded:Connect(function()
     task.wait(0.3)
     updateChar()
     if AIEnabled then scanGenerators() end
 end)
 createHub()
-print("🔥 Advanced AI Pathfinder loaded. Killer radius = slider value. Pathfinding goes around walls. Xeno ready.")
+print("✅ Advanced AI Pathfinder (with HIDE and CLOSE buttons) loaded. Xeno ready.")
