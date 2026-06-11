@@ -1,9 +1,9 @@
 --[[
-    FORSAKEN AI – FULLY FIXED
-    - Hazard avoidance (poison water, traps, lava)
-    - Wall avoidance (raycasts + steering)
-    - Minigame solver (detects ANY numbered UI element)
-    - Generator blacklist on completion or after repeated failures
+    FORSAKEN AI – SIMPLIFIED & STABLE
+    - Lobby detection (no AI until round starts)
+    - Lightweight wall avoidance (no freezing)
+    - Hazard avoidance (poison water)
+    - Universal minigame solver (clicks ANY dot in order)
 --]]
 
 -- // SERVICES // --
@@ -14,33 +14,28 @@ local RunService = game:GetService("RunService")
 local LP = Players.LocalPlayer
 
 -- // KILLER NAMES (real killers only) //
-local KILLER_NAMES = {
-    "noli", "slasher", "c00lkidd", "john doe", "1x1x1x1", "guest 666", "nosferatu"
-}
+local KILLER_NAMES = {"noli", "slasher", "c00lkidd", "john doe", "1x1x1x1", "guest 666", "nosferatu"}
 
--- // HAZARD PART NAMES (to avoid) //
-local HAZARD_NAMES = {
-    "poison", "toxic", "lava", "fire", "trap", "spike", "acid", "water"
-}
+-- // HAZARD PART NAMES //
+local HAZARD_NAMES = {"poison", "toxic", "lava", "fire", "trap", "spike", "acid"}
 
 -- // STATE // --
 local AIEnabled = false
 local ScriptActive = true
 local SliderValue = 40
-local MovingToTarget = false
 local PlayerChar, Humanoid, RootPart
 local Generators = {}
-local CompletedGenerators = {}      -- permanently done
-local FailedGenerators = {}         -- temporarily skip (after 3 failures)
+local CompletedGenerators = {}
+local FailedGenerators = {}
 local GeneratorFailureCount = {}
 local CurrentAction = "Idle"
 local LastFleeTime = 0
 local RoundActive = false
+local LastHazardCheck = 0
+local LastWallCheck = 0
 
 -- // CONSTANTS // --
 local WALK_SPEED = 24
-local HAZARD_AVOID_DIST = 15
-local WALL_CHECK_DIST = 5
 
 -- // DEBUG OVERLAY // --
 local DebugLabel
@@ -86,16 +81,29 @@ local function updateChar()
     end
 end
 
--- // ROUND DETECTION // --
+-- // LOBBY & ROUND DETECTION // --
 local function isRoundActive()
+    -- 1. Check if lobby GUI is visible
     local playerGui = LP:FindFirstChild("PlayerGui")
     if playerGui then
         for _, gui in pairs(playerGui:GetChildren()) do
             if gui:IsA("ScreenGui") and (gui.Name:lower():find("lobby") or gui.Name:lower():find("waiting")) then
-                if gui.Enabled then return false end
+                if gui.Enabled then
+                    updateDebug("In lobby (GUI visible)")
+                    return false
+                end
             end
         end
     end
+    -- 2. Check if round timer exists (e.g., "Round begins in")
+    if playerGui then
+        for _, label in pairs(playerGui:GetDescendants()) do
+            if label:IsA("TextLabel") and (label.Text:find("Round begins") or label.Text:find("Time left") or label.Text:find("survive")) then
+                return true
+            end
+        end
+    end
+    -- 3. If character exists and health > 0, assume round active
     return (PlayerChar and Humanoid and Humanoid.Health > 0)
 end
 
@@ -133,14 +141,17 @@ local function getNearestKiller()
     return nearest, nearestDist
 end
 
--- // HAZARD DETECTION (return true if hazard nearby) // --
-local function isHazardNearby(radius)
+-- // HAZARD AVOIDANCE (throttled) // --
+local function isHazardNearby()
+    local now = tick()
+    if now - LastHazardCheck < 1 then return false end
+    LastHazardCheck = now
     if not RootPart then return false end
     for _, hazardName in pairs(HAZARD_NAMES) do
         for _, part in pairs(workspace:GetDescendants()) do
             if part:IsA("BasePart") and part.Name:lower():find(hazardName) then
                 local dist = (RootPart.Position - part.Position).magnitude
-                if dist < radius then
+                if dist < 15 then
                     return true, part.Position
                 end
             end
@@ -149,30 +160,32 @@ local function isHazardNearby(radius)
     return false, nil
 end
 
--- // WALL AVOIDANCE (return a corrected move direction) // --
+-- // SIMPLE WALL AVOIDANCE (only when moving, throttled) // --
 local function getSteeredDirection(targetPos)
     if not RootPart then return targetPos end
+    local now = tick()
+    if now - LastWallCheck < 0.3 then return targetPos end
+    LastWallCheck = now
     local direction = (targetPos - RootPart.Position).unit
-    local ray = Ray.new(RootPart.Position, direction * WALL_CHECK_DIST)
+    local ray = Ray.new(RootPart.Position, direction * 4)
     local hit = workspace:FindPartOnRay(ray, PlayerChar)
-    if not hit then return targetPos end  -- no wall
-
-    -- Try left and right
+    if not hit then return targetPos end
+    -- Try right then left
     local right = direction:Cross(Vector3.new(0,1,0)).unit
     local left = -right
-    local testDirs = {right, left, Vector3.new(0,0,1), Vector3.new(0,0,-1), Vector3.new(1,0,0), Vector3.new(-1,0,0)}
+    local testDirs = {right, left}
     for _, dir in ipairs(testDirs) do
-        local testPos = RootPart.Position + dir * WALL_CHECK_DIST
-        local testRay = Ray.new(RootPart.Position, dir * WALL_CHECK_DIST)
+        local testPos = RootPart.Position + dir * 4
+        local testRay = Ray.new(RootPart.Position, dir * 4)
         local testHit = workspace:FindPartOnRay(testRay, PlayerChar)
         if not testHit then
-            return RootPart.Position + dir * WALL_CHECK_DIST
+            return RootPart.Position + dir * 4
         end
     end
     return targetPos  -- fallback
 end
 
--- // GENERATOR SCANNING (only real interactable parts) // --
+-- // GENERATOR SCANNING // --
 local function scanGenerators()
     local newGens = {}
     for _, prompt in pairs(workspace:GetDescendants()) do
@@ -196,7 +209,7 @@ local function scanGenerators()
     return #Generators
 end
 
--- // IMPROVED MINIGAME SOLVER (detects any numbered UI element) // --
+-- // UNIVERSAL MINIGAME SOLVER (clicks ALL clickable areas in order) // --
 local function solveMinigame()
     local minigameFrame = nil
     for i = 1, 30 do
@@ -217,119 +230,48 @@ local function solveMinigame()
         return false
     end
 
-    -- Find all numbered elements (TextLabel, TextButton, ImageButton with text property)
-    local dots = {}
+    -- Find all clickable objects (ImageButton, TextButton, or any object with MouseButton1Click)
+    local clickables = {}
     for _, child in pairs(minigameFrame:GetDescendants()) do
-        if child.Visible then
-            local num = nil
-            if child:IsA("TextLabel") or child:IsA("TextButton") then
-                num = tonumber(child.Text)
-            elseif child:IsA("ImageButton") then
-                num = tonumber(child.Name)  -- sometimes the number is in Name
-            end
-            if num then
-                table.insert(dots, {
-                    obj = child,
-                    number = num,
-                    color = child.BackgroundColor3,
-                    position = child.AbsolutePosition
-                })
+        if child:IsA("ImageButton") or child:IsA("TextButton") or (child:IsA("ImageLabel") and child:FindFirstChild("ClickDetector")) then
+            if child.Visible then
+                table.insert(clickables, child)
             end
         end
     end
-    if #dots < 2 then
-        updateDebug(string.format("Only %d numbered elements found (need ≥2)", #dots))
+    if #clickables < 2 then
+        updateDebug(string.format("Only %d clickables found (need ≥2)", #clickables))
         return false
     end
 
-    -- Group by color
-    local colorGroups = {}
-    for _, dot in pairs(dots) do
-        local key = tostring(dot.color)
-        if not colorGroups[key] then colorGroups[key] = {} end
-        table.insert(colorGroups[key], dot)
-    end
-
-    for _, group in pairs(colorGroups) do
-        table.sort(group, function(a,b) return a.number < b.number end)
-        for i = 1, #group - 1 do
-            local start = group[i]
-            local target = group[i+1]
-            if start.number == target.number then
-                local startPos = start.obj.AbsolutePosition + Vector2.new(start.obj.AbsoluteSize.X/2, start.obj.AbsoluteSize.Y/2)
-                local targetPos = target.obj.AbsolutePosition + Vector2.new(target.obj.AbsoluteSize.X/2, target.obj.AbsoluteSize.Y/2)
-                pcall(function()
-                    VirtualInput:SendMouseButtonEvent(startPos.X, startPos.Y, 0, true, game, 0)
-                    task.wait(0.05)
-                    for t = 0, 1, 0.1 do
-                        local x = startPos.X + (targetPos.X - startPos.X) * t
-                        local y = startPos.Y + (targetPos.Y - startPos.Y) * t
-                        VirtualInput:SendMouseMoveEvent(x, y, game, 0)
-                        task.wait(0.02)
-                    end
-                    VirtualInput:SendMouseButtonEvent(targetPos.X, targetPos.Y, 0, false, game, 0)
-                end)
-                task.wait(0.2)
-            end
+    -- Sort by position (left to right, top to bottom)
+    table.sort(clickables, function(a,b)
+        if math.abs(a.AbsolutePosition.Y - b.AbsolutePosition.Y) < 50 then
+            return a.AbsolutePosition.X < b.AbsolutePosition.X
+        else
+            return a.AbsolutePosition.Y < b.AbsolutePosition.Y
         end
+    end)
+
+    -- Click each clickable in sequence (simulate solving by brute force)
+    for _, btn in ipairs(clickables) do
+        local pos = btn.AbsolutePosition + Vector2.new(btn.AbsoluteSize.X/2, btn.AbsoluteSize.Y/2)
+        pcall(function()
+            VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+            task.wait(0.05)
+            VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+        end)
+        task.wait(0.15)
     end
     return true
 end
 
--- // INTERACT WITH GENERATOR (hold F until UI appears, then solve) // --
+-- // INTERACT WITH GENERATOR (hold F until UI appears) // --
 local function interactWithGenerator(gen)
     updateDebug("Interacting with generator: " .. gen.Name)
     local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
-    if prompt then
-        pcall(function()
-            VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
-        end)
-        local uiOpened = false
-        for i = 1, 40 do
-            task.wait(0.1)
-            local playerGui = LP:FindFirstChild("PlayerGui")
-            if playerGui then
-                for _, gui in pairs(playerGui:GetDescendants()) do
-                    if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                        uiOpened = true
-                        break
-                    end
-                end
-            end
-            if uiOpened then break end
-        end
-        pcall(function()
-            VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
-        end)
-        if uiOpened then
-            updateDebug("Minigame opened")
-            local solved = solveMinigame()
-            if solved then
-                -- Wait for UI to close
-                for i = 1, 40 do
-                    task.wait(0.3)
-                    local playerGui = LP:FindFirstChild("PlayerGui")
-                    if playerGui then
-                        local found = false
-                        for _, gui in pairs(playerGui:GetDescendants()) do
-                            if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                                found = true
-                                break
-                            end
-                        end
-                        if not found then
-                            updateDebug("Generator completed successfully")
-                            table.insert(CompletedGenerators, gen)
-                            return true
-                        end
-                    end
-                end
-            end
-        else
-            updateDebug("Minigame did not open")
-        end
-    else
-        -- Use click detector via screen click
+    if not prompt then
+        updateDebug("No proximity prompt – trying click")
         local click = gen:FindFirstChildWhichIsA("ClickDetector")
         if click and RootPart then
             local screenPos, onScreen = workspace.CurrentCamera:WorldToScreenPoint(gen.Position)
@@ -339,69 +281,95 @@ local function interactWithGenerator(gen)
                     task.wait(0.3)
                     VirtualInput:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, false, game, 0)
                 end)
-                updateDebug("Clicked generator")
-                -- Wait for minigame UI
-                for i = 1, 40 do
-                    task.wait(0.2)
-                    local playerGui = LP:FindFirstChild("PlayerGui")
-                    if playerGui then
-                        for _, gui in pairs(playerGui:GetDescendants()) do
-                            if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                                updateDebug("Minigame opened after click")
-                                local solved = solveMinigame()
-                                if solved then
-                                    table.insert(CompletedGenerators, gen)
-                                    return true
-                                end
-                            end
+            end
+        end
+    end
+
+    -- Hold F for 1.5 seconds to open minigame
+    pcall(function()
+        VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+    end)
+    local uiOpened = false
+    for i = 1, 30 do
+        task.wait(0.1)
+        local playerGui = LP:FindFirstChild("PlayerGui")
+        if playerGui then
+            for _, gui in pairs(playerGui:GetDescendants()) do
+                if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
+                    uiOpened = true
+                    break
+                end
+            end
+        end
+        if uiOpened then break end
+    end
+    pcall(function()
+        VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+    end)
+
+    if uiOpened then
+        updateDebug("Minigame opened – solving")
+        local solved = solveMinigame()
+        if solved then
+            -- Wait for UI to close
+            for i = 1, 30 do
+                task.wait(0.3)
+                local playerGui = LP:FindFirstChild("PlayerGui")
+                if playerGui then
+                    local found = false
+                    for _, gui in pairs(playerGui:GetDescendants()) do
+                        if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
+                            found = true
+                            break
                         end
+                    end
+                    if not found then
+                        updateDebug("Generator completed successfully")
+                        table.insert(CompletedGenerators, gen)
+                        return true
                     end
                 end
             end
         end
+    else
+        updateDebug("Minigame did not open")
     end
-    -- If we get here, interaction failed – increment failure counter
+
+    -- Mark as failed after 3 attempts
     GeneratorFailureCount[gen] = (GeneratorFailureCount[gen] or 0) + 1
     if GeneratorFailureCount[gen] >= 3 then
-        updateDebug("Generator failed 3 times – skipping permanently")
+        updateDebug("Generator failed 3 times – skipping")
         table.insert(FailedGenerators, gen)
     end
     return false
 end
 
--- // SMART MOVE (avoids hazards and walls) // --
+-- // SMART MOVE (with wall and hazard avoidance) // --
 local function smartMoveTo(targetPos)
     if not RootPart or not Humanoid then return end
-    -- Check hazard nearby
-    local hazardNear, hazardPos = isHazardNearby(HAZARD_AVOID_DIST)
+    -- Check hazard
+    local hazardNear, hazardPos = isHazardNearby()
     if hazardNear then
         local away = (RootPart.Position - hazardPos).unit
-        local safePos = RootPart.Position + away * 20
-        Humanoid:MoveTo(safePos)
+        Humanoid:MoveTo(RootPart.Position + away * 20)
         CurrentAction = "Avoiding hazard"
         return
     end
     -- Wall avoidance
-    local steeredTarget = getSteeredDirection(targetPos)
-    Humanoid:MoveTo(steeredTarget)
+    local steered = getSteeredDirection(targetPos)
+    Humanoid:MoveTo(steered)
 end
 
--- // FLEE WITH HAZARD AND WALL AVOIDANCE // --
+-- // FLEE FROM KILLER // --
 local function fleeFromKiller(killerPos)
     if not RootPart then return end
     local away = (RootPart.Position - killerPos).unit
-    local fleePos = RootPart.Position + away * 30
+    local fleePos = RootPart.Position + away * 35
     fleePos = Vector3.new(math.clamp(fleePos.X, -500, 500), fleePos.Y, math.clamp(fleePos.Z, -500, 500))
-    -- Also check hazard
-    local hazardNear, hazardPos = isHazardNearby(HAZARD_AVOID_DIST)
-    if hazardNear then
-        local awayFromHazard = (RootPart.Position - hazardPos).unit
-        fleePos = RootPart.Position + awayFromHazard * 30
-    end
     smartMoveTo(fleePos)
 end
 
--- // MAIN AI LOOP // --
+-- // MAIN AI LOOP (throttled to 0.5s) // --
 local function aiTick()
     if not AIEnabled or not ScriptActive then return end
     if not PlayerChar or not Humanoid or not RootPart then
@@ -410,7 +378,10 @@ local function aiTick()
     end
     RoundActive = isRoundActive()
     if not RoundActive then
-        CurrentAction = "Waiting for round"
+        if CurrentAction ~= "Waiting for round" then
+            CurrentAction = "Waiting for round"
+            updateDebug("In lobby – AI idle")
+        end
         return
     end
 
@@ -505,10 +476,10 @@ task.spawn(function()
     end
 end)
 
--- // GUI HUB // --
+-- // GUI HUB (unchanged, simplified) // --
 local function createHub()
     local sg = Instance.new("ScreenGui")
-    sg.Name = "ForsakenAIFullyFixed"
+    sg.Name = "ForsakenAIFinalStable"
     sg.Parent = game.CoreGui
     sg.ResetOnSpawn = false
 
@@ -523,7 +494,7 @@ local function createHub()
     local title = Instance.new("TextLabel")
     title.Size = UDim2.new(1,0,0,35)
     title.BackgroundTransparency = 1
-    title.Text = "⚡ FORSAKEN AI (HAZARD + WALL AVOID) ⚡"
+    title.Text = "⚡ FORSAKEN AI (STABLE) ⚡"
     title.TextColor3 = Color3.fromRGB(0,200,255)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 15
@@ -690,7 +661,7 @@ local function createHub()
             toggle.BackgroundColor3 = Color3.fromRGB(0,180,80)
             updateChar()
             scanGenerators()
-            updateDebug("AI enabled – hazard+wall avoidance active")
+            updateDebug("AI enabled – stable version")
         else
             toggle.Text = "🔴 AI OFF"
             toggle.BackgroundColor3 = Color3.fromRGB(0,120,200)
@@ -698,7 +669,6 @@ local function createHub()
         end
     end)
 
-    -- Status updater for GUI
     task.spawn(function()
         while ScriptActive and sg do
             task.wait(1)
@@ -740,4 +710,4 @@ LP.CharacterAdded:Connect(function()
     if AIEnabled then scanGenerators() end
 end)
 createHub()
-updateDebug("Fully fixed AI loaded. Hazards (poison water) will be avoided. Walls will be steered around. Minigame solver detects all numbered UI elements.")
+updateDebug("Stable AI loaded. Lobby detection enabled. Hazards avoided. Minigame solver clicks all visible buttons.")
