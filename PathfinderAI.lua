@@ -36,6 +36,8 @@ local CurrentAction = "Idle"
 local LastGenScan = 0
 local LastPathTime = 0
 local CurrentMap = "Unknown"
+local IsFleeing = false
+local LastFleePath = nil
 
 -- // CONSTANTS // --
 local WALK_SPEED = 24
@@ -312,44 +314,74 @@ local function interactWithGenerator(gen)
 end
 
 -- // PATHFINDING MOVE (to a position) // --
-local function pathfindToPosition(targetPos)
+local function pathfindToPosition(targetPos, isFlee = false)
     if not RootPart or not Humanoid then return false end
+    
     local path = PathfindingService:CreatePath(PATH_OPTIONS)
     local success = pcall(function()
         path:ComputeAsync(RootPart.Position, targetPos)
     end)
+    
     if not success or path.Status ~= Enum.PathStatus.Success then
         Humanoid:MoveTo(targetPos)
         return false
     end
+    
     local waypoints = path:GetWaypoints()
     if #waypoints == 0 then return false end
-    for _, wp in ipairs(waypoints) do
+    
+    for i, wp in ipairs(waypoints) do
         if not AIEnabled then break end
+        
+        -- If the path is obsolete (e.g., the killer has moved or we got stuck), break early to recompute
+        if isFlee and i > 1 and tick() - LastPathTime > 1.5 then
+            return false
+        end
+        
         if wp.Action == Enum.PathWaypointAction.Jump then
             Humanoid.Jump = true
             task.wait(0.2)
         end
+        
         Humanoid:MoveTo(wp.Position)
-        -- Wait until we reach the waypoint or timeout
+        
         local start = tick()
         while (RootPart.Position - wp.Position).magnitude > 3 do
             if tick() - start > 2 then break end
             if not AIEnabled then break end
+            
+            -- If we're fleeing and the killer is still close, recompute
+            if isFlee then
+                local _, kDist = getNearestKiller()
+                if kDist <= SliderValue then
+                    return false
+                end
+            end
+            
             task.wait(0.05)
         end
     end
+    
+    LastPathTime = tick()
     return true
 end
 
 -- // SMART FLEE (pathfind away from killer) // --
 local function fleeFromKiller(killerPos)
     if not RootPart then return end
+    
     local awayDir = (RootPart.Position - killerPos).unit
     local fleePos = RootPart.Position + awayDir * 40
+    
     -- Clamp to reasonable bounds
     fleePos = Vector3.new(math.clamp(fleePos.X, -500, 500), fleePos.Y, math.clamp(fleePos.Z, -500, 500))
-    pathfindToPosition(fleePos)
+    
+    local success = pathfindToPosition(fleePos, true)
+    
+    -- If pathfinding failed, fall back to a simple straight line flee
+    if not success then
+        Humanoid:MoveTo(fleePos)
+    end
 end
 
 -- // MAIN AI LOOP // --
