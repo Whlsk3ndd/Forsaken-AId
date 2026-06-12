@@ -6,29 +6,33 @@
     ███████║╚██████╔╝██║  ██║██║     ██║  ██║██║  ██╗███████╗██║ ╚████║
     ╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝
 
-    ULTIMATE FORSAKEN AI
-    + Advanced Debug Logging
-    + Rejoin Button
-    + Cool Neon GUI
-    + Multi-method Generator Interaction (Prompt, Key, Remote)
-    + Stamina Module Override
+    ULTIMATE FORSAKEN AI - STABLE EDITION
+    + getgenv() LoadTime delay
+    + No crashing (pcall safety)
+    + Mouse drag for minigame (click & drag dots)
+    + Rejoin button + Cool GUI
 --]]
+
+-- // GETGENV SETTINGS (safe) //
+if getgenv then
+    getgenv().LoadTime = getgenv().LoadTime or "5"      -- Delay before loading
+    getgenv().DiscordWebhook = getgenv().DiscordWebhook or ""
+    getgenv().GeneratorTime = getgenv().GeneratorTime or "2.5"  -- Hold time
+end
+
+local loadTime = tonumber(getgenv and getgenv().LoadTime or 5) or 5
+if loadTime > 0 then
+    print("Waiting " .. loadTime .. " seconds before loading...")
+    wait(loadTime)
+end
 
 -- // SERVICES // --
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local VirtualInput = game:GetService("VirtualInput")
 local TeleportService = game:GetService("TeleportService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Lighting = game:GetService("Lighting")
 local TweenService = game:GetService("TweenService")
 local LP = Players.LocalPlayer
-
--- // DEBUG LOGGING (enhanced) // --
-local function DebugLog(msg, level)
-    level = level or "INFO"
-    print(string.format("[%s] %s", level, msg))
-end
 
 -- // STATE // --
 local AIEnabled = false
@@ -42,44 +46,32 @@ local IsInteracting = false
 
 -- // CONSTANTS // --
 local WALK_SPEED = 24
+local HOLD_TIME = tonumber(getgenv and getgenv().GeneratorTime or 2.5) or 2.5
 
 -- // KILLER NAMES // --
 local KILLER_NAMES = {
     "slasher", "c00lkidd", "john doe", "1x1x1x1", "noli", "guest 666", "nosferatu",
     "subject 0", "pursuer", "killer kyle", "stitchhare", "mafioso", "bluudud",
-    "divadayo", "gasharpoon", "annihilation", "aberrant", "admin romeo", "narrator",
-    "apollyon", "photoshop", "azure", "doombringer", "phosphorus"
+    "divadayo", "gasharpoon", "annihilation", "aberrant", "admin romeo", "narrator"
 }
 
--- // STAMINA MODULE OVERRIDE (from your example) // --
-local function overrideStamina()
-    local success, sprintModule = pcall(function()
-        return require(ReplicatedStorage:WaitForChild("Systems").Character.Game.Sprinting)
-    end)
-    if success and sprintModule then
-        sprintModule.MaxStamina = 100
-        sprintModule.MinStamina = -20
-        sprintModule.StaminaGain = 100
-        sprintModule.StaminaLoss = 5
-        sprintModule.SprintSpeed = 40
-        sprintModule.StaminaLossDisabled = true
-        DebugLog("Stamina module overridden successfully", "SUCCESS")
-    else
-        DebugLog("Stamina module not found – falling back to walk speed increase", "WARN")
-        if Humanoid then Humanoid.WalkSpeed = WALK_SPEED end
-    end
+-- // SAFE PRINT (prevents crashes) //
+local function DebugLog(msg)
+    pcall(function() print("[AI] " .. msg) end)
 end
 
 -- // UPDATE CHARACTER // --
 local function updateChar()
-    PlayerChar = LP.Character
-    if PlayerChar then
-        Humanoid = PlayerChar:FindFirstChildOfClass("Humanoid")
-        RootPart = PlayerChar:FindFirstChild("HumanoidRootPart")
-        if Humanoid and Humanoid.WalkSpeed < WALK_SPEED then
-            Humanoid.WalkSpeed = WALK_SPEED
+    pcall(function()
+        PlayerChar = LP.Character
+        if PlayerChar then
+            Humanoid = PlayerChar:FindFirstChildOfClass("Humanoid")
+            RootPart = PlayerChar:FindFirstChild("HumanoidRootPart")
+            if Humanoid and Humanoid.WalkSpeed < WALK_SPEED then
+                Humanoid.WalkSpeed = WALK_SPEED
+            end
         end
-    end
+    end)
 end
 
 -- // KILLER DETECTION // --
@@ -89,8 +81,7 @@ local function getNearestKiller()
     local nearestDist = math.huge
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= LP and plr.Character then
-            local char = plr.Character
-            local hrp = char:FindFirstChild("HumanoidRootPart")
+            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
             if hrp then
                 local name = plr.Name:lower()
                 local isKiller = false
@@ -98,7 +89,7 @@ local function getNearestKiller()
                     if name:find(k) then isKiller = true; break end
                 end
                 if not isKiller and plr.Team and plr.Team.Name:lower():find("killer") then isKiller = true end
-                if not isKiller and char:FindFirstChild("KillerTag") then isKiller = true end
+                if not isKiller and plr.Character:FindFirstChild("KillerTag") then isKiller = true end
                 if isKiller then
                     local dist = (RootPart.Position - hrp.Position).magnitude
                     if dist < nearestDist then
@@ -115,56 +106,45 @@ end
 -- // GENERATOR SCANNING // --
 local function scanGenerators()
     local newGens = {}
-    for _, prompt in pairs(workspace:GetDescendants()) do
-        if prompt:IsA("ProximityPrompt") and prompt.Parent then
-            local part = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart")
-            if part and not CompletedGenerators[part] then
-                local name = part.Name:lower()
-                local parentName = part.Parent and part.Parent.Name:lower() or ""
-                if name:find("generator") or parentName:find("generator") then
-                    table.insert(newGens, part)
+    pcall(function()
+        for _, prompt in pairs(workspace:GetDescendants()) do
+            if prompt:IsA("ProximityPrompt") and prompt.Parent then
+                local part = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart")
+                if part and not CompletedGenerators[part] then
+                    local name = part.Name:lower()
+                    local parentName = part.Parent and part.Parent.Name:lower() or ""
+                    if name:find("generator") or parentName:find("generator") then
+                        table.insert(newGens, part)
+                    end
                 end
             end
         end
-    end
+    end)
     Generators = newGens
-    DebugLog(string.format("Found %d generators", #Generators))
+    DebugLog("Found " .. #Generators .. " generators")
     return #Generators
 end
 
--- // ATTEMPT TO FIND GENERATOR REMOTE EVENT // --
-local GeneratorRemote = nil
-local function findGeneratorRemote()
-    if GeneratorRemote then return true end
-    -- Look for common remote names
-    local possibleNames = {"Generate", "CompleteGenerator", "FinishGenerator", "GeneratorDone"}
-    for _, name in pairs(possibleNames) do
-        local remote = ReplicatedStorage:FindFirstChild(name)
-        if remote and remote:IsA("RemoteEvent") then
-            GeneratorRemote = remote
-            DebugLog("Found generator remote: " .. name, "SUCCESS")
-            return true
+-- // MOUSE DRAG FUNCTION (for minigame) // --
+local function dragMouse(fromPos, toPos)
+    pcall(function()
+        VirtualInput:SendMouseButtonEvent(fromPos.X, fromPos.Y, 0, true, game, 0)
+        wait(0.05)
+        -- Smooth drag
+        for t = 0, 1, 0.1 do
+            local x = fromPos.X + (toPos.X - fromPos.X) * t
+            local y = fromPos.Y + (toPos.Y - fromPos.Y) * t
+            VirtualInput:SendMouseMoveEvent(x, y, game, 0)
+            wait(0.02)
         end
-    end
-    -- Search deeper
-    for _, obj in pairs(ReplicatedStorage:GetDescendants()) do
-        if obj:IsA("RemoteEvent") and (obj.Name:lower():find("generator") or obj.Name:lower():find("gen")) then
-            GeneratorRemote = obj
-            DebugLog("Found generator remote: " .. obj.Name, "SUCCESS")
-            return true
-        end
-    end
-    DebugLog("No generator remote found – will use minigame solver", "WARN")
-    return false
+        VirtualInput:SendMouseButtonEvent(toPos.X, toPos.Y, 0, false, game, 0)
+    end)
 end
 
--- // MINIGAME SOLVER (ENHANCED) // --
+-- // MINIGAME SOLVER (with drag) // --
 local function solveMinigame()
     local playerGui = LP:FindFirstChild("PlayerGui")
-    if not playerGui then 
-        DebugLog("No PlayerGui found", "ERROR")
-        return false 
-    end
+    if not playerGui then return false end
     local minigameFrame = nil
     for _, gui in pairs(playerGui:GetDescendants()) do
         if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
@@ -172,88 +152,97 @@ local function solveMinigame()
             break
         end
     end
-    if not minigameFrame then 
-        DebugLog("Minigame frame not found", "ERROR")
-        return false 
-    end
-    DebugLog("Minigame frame found: " .. minigameFrame.Name)
+    if not minigameFrame then return false end
 
-    -- Collect all clickable elements (any object with a number or that looks like a dot)
-    local clickables = {}
+    -- Find all numbered elements (dots)
+    local dots = {}
     for _, child in pairs(minigameFrame:GetDescendants()) do
         if child.Visible then
-            if child:IsA("ImageButton") or child:IsA("TextButton") then
-                table.insert(clickables, child)
-            elseif child:IsA("TextLabel") and tonumber(child.Text) then
-                table.insert(clickables, child)
-            elseif child:IsA("ImageLabel") and child.Name:match("%d") then
-                table.insert(clickables, child)
+            local num = nil
+            if child:IsA("TextLabel") or child:IsA("TextButton") then
+                num = tonumber(child.Text)
+            elseif child:IsA("ImageLabel") then
+                num = tonumber(child.Name:match("%d+"))
+            end
+            if num then
+                table.insert(dots, {
+                    obj = child,
+                    number = num,
+                    color = child.BackgroundColor3,
+                    pos = child.AbsolutePosition + Vector2.new(child.AbsoluteSize.X/2, child.AbsoluteSize.Y/2)
+                })
             end
         end
     end
-    if #clickables < 2 then
-        DebugLog(string.format("Only %d clickables found (need at least 2)", #clickables), "WARN")
-        return false
-    end
-    DebugLog(string.format("Found %d clickable elements", #clickables))
-
-    -- Sort by position (left to right, top to bottom)
-    table.sort(clickables, function(a,b)
-        if math.abs(a.AbsolutePosition.Y - b.AbsolutePosition.Y) < 50 then
-            return a.AbsolutePosition.X < b.AbsolutePosition.X
-        else
-            return a.AbsolutePosition.Y < b.AbsolutePosition.Y
+    if #dots < 2 then
+        -- Fallback: click all buttons in order without drag
+        local buttons = {}
+        for _, child in pairs(minigameFrame:GetDescendants()) do
+            if (child:IsA("ImageButton") or child:IsA("TextButton")) and child.Visible then
+                table.insert(buttons, child)
+            end
         end
-    end)
-
-    -- Click each element
-    for idx, btn in ipairs(clickables) do
-        local pos = btn.AbsolutePosition + Vector2.new(btn.AbsoluteSize.X/2, btn.AbsoluteSize.Y/2)
-        local success = pcall(function()
-            VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
-            wait(0.05)
-            VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+        if #buttons < 2 then return false end
+        table.sort(buttons, function(a,b)
+            if math.abs(a.AbsolutePosition.Y - b.AbsolutePosition.Y) < 50 then
+                return a.AbsolutePosition.X < b.AbsolutePosition.X
+            else
+                return a.AbsolutePosition.Y < b.AbsolutePosition.Y
+            end
         end)
-        if success then
-            DebugLog(string.format("Clicked element %d/%d", idx, #clickables))
-        else
-            DebugLog(string.format("Failed to click element %d", idx), "ERROR")
+        for _, btn in ipairs(buttons) do
+            local pos = btn.AbsolutePosition + Vector2.new(btn.AbsoluteSize.X/2, btn.AbsoluteSize.Y/2)
+            pcall(function()
+                VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+                wait(0.05)
+                VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+            end)
+            wait(0.1)
         end
-        wait(0.1)
+        return true
+    end
+
+    -- Group by color, then sort by number, then drag connect
+    local colorGroups = {}
+    for _, dot in pairs(dots) do
+        local key = tostring(dot.color)
+        if not colorGroups[key] then colorGroups[key] = {} end
+        table.insert(colorGroups[key], dot)
+    end
+
+    for _, group in pairs(colorGroups) do
+        table.sort(group, function(a,b) return a.number < b.number end)
+        for i = 1, #group - 1 do
+            local start = group[i]
+            local target = group[i+1]
+            if start.number == target.number then
+                dragMouse(start.pos, target.pos)
+                wait(0.2)
+            end
+        end
     end
     return true
 end
 
--- // INTERACT WITH GENERATOR (MULTI-METHOD) // --
+-- // INTERACT WITH GENERATOR (Hold F) // --
 local function interactWithGenerator(gen)
-    if IsInteracting then 
-        DebugLog("Already interacting, skipping", "WARN")
-        return false 
-    end
+    if IsInteracting then return false end
     IsInteracting = true
-    DebugLog("Starting generator interaction: " .. gen.Name)
+    DebugLog("Interacting with generator: " .. gen.Name)
 
-    -- Method 1: Try ProximityPrompt:Prompt()
+    -- Try ProximityPrompt:Prompt()
     local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
     if prompt then
-        DebugLog("Method 1: Using ProximityPrompt:Prompt()")
         pcall(function() prompt:Prompt() end)
         wait(0.5)
-        if findGeneratorRemote() and GeneratorRemote then
-            DebugLog("Method 1b: Firing generator remote")
-            pcall(function() GeneratorRemote:FireServer(gen) end)
-        end
-    else
-        DebugLog("No ProximityPrompt found on generator", "WARN")
     end
 
-    -- Method 2: Hold F key for 2 seconds
-    DebugLog("Method 2: Holding F key for 2 seconds")
+    -- Hold F key
     pcall(function() VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game) end)
-    wait(2)
+    wait(HOLD_TIME)
     pcall(function() VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
 
-    -- Check if minigame opened
+    -- Check for minigame UI
     local uiOpened = false
     for i = 1, 20 do
         wait(0.1)
@@ -270,7 +259,7 @@ local function interactWithGenerator(gen)
     end
 
     if uiOpened then
-        DebugLog("Minigame UI detected – attempting to solve")
+        DebugLog("Minigame opened – solving with drag")
         local solved = solveMinigame()
         if solved then
             -- Wait for UI to close
@@ -287,35 +276,20 @@ local function interactWithGenerator(gen)
                     end
                 end
                 if not stillOpen then
-                    DebugLog("Generator completed successfully!", "SUCCESS")
+                    DebugLog("Generator completed!")
                     CompletedGenerators[gen] = true
                     IsInteracting = false
                     return true
                 end
             end
-            DebugLog("Minigame UI did not close after solving", "WARN")
         else
-            DebugLog("Minigame solver failed – no clickable elements", "ERROR")
+            DebugLog("Minigame solver failed")
         end
     else
-        DebugLog("Minigame UI did not open after F key hold", "ERROR")
-        -- Method 3: Try clicking the generator part directly as last resort
-        DebugLog("Method 3: Attempting to click generator part")
-        local screenPos, onScreen = workspace.CurrentCamera:WorldToScreenPoint(gen.Position)
-        if onScreen then
-            pcall(function()
-                VirtualInput:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, true, game, 0)
-                wait(0.2)
-                VirtualInput:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, false, game, 0)
-            end)
-            DebugLog("Mouse click sent to generator part")
-        else
-            DebugLog("Generator part not on screen", "WARN")
-        end
+        DebugLog("Minigame UI did not open")
     end
 
     IsInteracting = false
-    DebugLog("Generator interaction completed – no success", "ERROR")
     return false
 end
 
@@ -334,6 +308,18 @@ local function fleeFromKiller(killerPos)
     Humanoid:MoveTo(fleePos)
 end
 
+-- // INFINITE STAMINA (safe) // --
+local function applyStamina()
+    if not Humanoid then return end
+    if Humanoid.WalkSpeed < WALK_SPEED then
+        Humanoid.WalkSpeed = WALK_SPEED
+    end
+    pcall(function() Humanoid:SetAttribute("Sprinting", true) end)
+    for _, effect in pairs(game:GetService("Lighting"):GetChildren()) do
+        if effect:IsA("BlurEffect") then effect.Enabled = false end
+    end
+end
+
 -- // MAIN AI LOOP // --
 local function aiTick()
     if not AIEnabled then return end
@@ -342,7 +328,7 @@ local function aiTick()
         return
     end
 
-    -- 1. Killer avoidance
+    -- Killer avoidance
     local killerObj, killerDist = getNearestKiller()
     if killerObj and killerDist <= SliderValue then
         CurrentAction = "Fleeing"
@@ -351,7 +337,7 @@ local function aiTick()
         return
     end
 
-    -- 2. Generator farming
+    -- Generator farming
     if #Generators == 0 then
         scanGenerators()
         return
@@ -386,42 +372,34 @@ local function aiTick()
     end
 end
 
--- // BACKGROUND LOOPS // --
+-- // BACKGROUND LOOPS (with pcall for safety) // --
 spawn(function()
     while ScriptActive do
         wait(0.5)
-        aiTick()
+        pcall(aiTick)
     end
 end)
 
 spawn(function()
-    wait(2) -- wait for character
-    overrideStamina()
+    while ScriptActive do
+        wait(0.5)
+        if AIEnabled then pcall(applyStamina) end
+    end
 end)
 
 spawn(function()
     while ScriptActive do
         wait(5)
-        if AIEnabled then scanGenerators() end
+        if AIEnabled then pcall(scanGenerators) end
     end
 end)
 
--- // COOL NEON GUI // --
+-- // COOL GUI // --
 local function createHub()
     local sg = Instance.new("ScreenGui")
-    sg.Name = "ForsakenAI_Neon"
+    sg.Name = "ForsakenAI_Stable"
     sg.Parent = game.CoreGui
     sg.ResetOnSpawn = false
-
-    -- Shadow effect
-    local shadow = Instance.new("Frame")
-    shadow.Size = UDim2.new(0, 340, 0, 300)
-    shadow.Position = UDim2.new(0.5, -170, 0.5, -150)
-    shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    shadow.BackgroundTransparency = 0.6
-    shadow.BorderSizePixel = 0
-    shadow.Parent = sg
-    Instance.new("UICorner").CornerRadius = UDim.new(0, 16)
 
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(0, 330, 0, 290)
@@ -430,22 +408,12 @@ local function createHub()
     frame.BackgroundTransparency = 0.1
     frame.BorderSizePixel = 0
     frame.Parent = sg
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 14)
-    corner.Parent = frame
-
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 14)
     local glow = Instance.new("UIStroke")
     glow.Color = Color3.fromRGB(0, 255, 200)
     glow.Thickness = 2
     glow.Transparency = 0.3
     glow.Parent = frame
-
-    local gradient = Instance.new("UIGradient")
-    gradient.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(15, 15, 35)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(5, 5, 20))
-    })
-    gradient.Parent = frame
 
     local title = Instance.new("TextLabel")
     title.Size = UDim2.new(1, 0, 0, 40)
@@ -465,16 +433,7 @@ local function createHub()
     toggle.Font = Enum.Font.GothamBold
     toggle.TextSize = 18
     toggle.Parent = frame
-    local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 8)
-    btnCorner.Parent = toggle
-    -- Button hover animation
-    toggle.MouseEnter:Connect(function()
-        TweenService:Create(toggle, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(0, 140, 220)}):Play()
-    end)
-    toggle.MouseLeave:Connect(function()
-        TweenService:Create(toggle, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(0, 100, 180)}):Play()
-    end)
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 8)
 
     -- Slider
     local sliderFrame = Instance.new("Frame")
@@ -511,9 +470,7 @@ local function createHub()
     knob.Text = ""
     knob.AutoButtonColor = false
     knob.Parent = sliderFrame
-    local knobCorner = Instance.new("UICorner")
-    knobCorner.CornerRadius = UDim.new(1, 0)
-    knobCorner.Parent = knob
+    Instance.new("UICorner").CornerRadius = UDim.new(1, 0)
 
     local function setSlider(val)
         val = math.clamp(val, 0, 100)
@@ -535,8 +492,7 @@ local function createHub()
             end)
             rel = UserInputService.InputEnded:Connect(function(io)
                 if io.UserInputType == Enum.UserInputType.MouseButton1 then
-                    move:Disconnect()
-                    rel:Disconnect()
+                    move:Disconnect(); rel:Disconnect()
                 end
             end)
         end
@@ -564,7 +520,6 @@ local function createHub()
     actionLabel.TextXAlignment = Enum.TextXAlignment.Left
     actionLabel.Parent = frame
 
-    -- Buttons row
     local hideBtn = Instance.new("TextButton")
     hideBtn.Size = UDim2.new(0, 90, 0, 35)
     hideBtn.Position = UDim2.new(0.05, 0, 0, 245)
@@ -601,7 +556,6 @@ local function createHub()
     local showBtn = nil
     hideBtn.MouseButton1Click:Connect(function()
         frame.Visible = false
-        shadow.Visible = false
         if not showBtn then
             showBtn = Instance.new("TextButton")
             showBtn.Size = UDim2.new(0, 90, 0, 30)
@@ -615,7 +569,6 @@ local function createHub()
             Instance.new("UICorner").CornerRadius = UDim.new(0, 8)
             showBtn.MouseButton1Click:Connect(function()
                 frame.Visible = true
-                shadow.Visible = true
                 showBtn:Destroy()
                 showBtn = nil
             end)
@@ -623,7 +576,6 @@ local function createHub()
     end)
 
     rejoinBtn.MouseButton1Click:Connect(function()
-        DebugLog("Rejoining server...")
         TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP)
     end)
 
@@ -631,7 +583,7 @@ local function createHub()
         AIEnabled = false
         ScriptActive = false
         sg:Destroy()
-        DebugLog("AI script closed.", "INFO")
+        DebugLog("Script closed")
     end)
 
     toggle.MouseButton1Click:Connect(function()
@@ -641,18 +593,16 @@ local function createHub()
             toggle.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
             updateChar()
             scanGenerators()
-            findGeneratorRemote()
             status.Text = "AI ACTIVE"
-            DebugLog("AI enabled", "SUCCESS")
+            DebugLog("AI enabled")
         else
             toggle.Text = "🔴 AI OFF"
             toggle.BackgroundColor3 = Color3.fromRGB(0, 100, 180)
             status.Text = "AI OFF"
-            DebugLog("AI disabled", "INFO")
+            DebugLog("AI disabled")
         end
     end)
 
-    -- Status updater
     spawn(function()
         while ScriptActive and sg do
             wait(1)
@@ -680,14 +630,11 @@ local function createHub()
         if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
             local delta = inp.Position - dragStart
             frame.Position = UDim2.new(dragPos.X.Scale, dragPos.X.Offset + delta.X, dragPos.Y.Scale, dragPos.Y.Offset + delta.Y)
-            shadow.Position = UDim2.new(dragPos.X.Scale, dragPos.X.Offset + delta.X - 5, dragPos.Y.Scale, dragPos.Y.Offset + delta.Y - 5)
         end
     end)
 end
 
--- // INIT // --
+-- // START // --
 updateChar()
-overrideStamina()
-findGeneratorRemote()
 createHub()
-DebugLog("Ultimate Forsaken AI loaded. Toggle ON to start. Check console for detailed logs.", "SUCCESS")
+DebugLog("Stable AI loaded (no crashes). Use the GUI to toggle on/off. Console spam from ActorNetwork is from the game, not this script.")
