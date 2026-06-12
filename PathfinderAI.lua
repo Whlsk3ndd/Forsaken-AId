@@ -1,11 +1,17 @@
 --[[
-    FORSAKEN AI – XENO COMPATIBLE
-    Uses only standard Roblox APIs – no VirtualInput, no TeleportService
+    FORSAKEN AI – PATHFINDING + GENERATOR FIX
+    - Uses Roblox PathfindingService to avoid walls
+    - Holds F for 2 seconds, then prompts again if needed
+    - Killer detection based on names/team (ignores survivors)
 --]]
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local PathfindingService = game:GetService("PathfindingService")
 local LP = Players.LocalPlayer
+
+-- Key simulation (Xeno supports VirtualInput)
+local VirtualInput = game:GetService("VirtualInput")
 
 -- State
 local AIEnabled = false
@@ -19,7 +25,15 @@ local CurrentAction = "Idle"
 -- Constants
 local WALK_SPEED = 24
 
--- Helper: update character reference
+-- Killer names (based on Forsaken wiki)
+local KILLER_NAMES = {
+    "slasher", "c00lkidd", "john doe", "1x1x1x1", "noli", "guest 666", "nosferatu",
+    "subject 0", "pursuer", "killer kyle", "stitchhare", "mafioso", "bluudud",
+    "divadayo", "gasharpoon", "annihilation", "aberrant", "admin romeo", "narrator",
+    "apollyon", "photoshop", "azure", "doombringer", "phosphorus"
+}
+
+-- Helper functions
 local function updateChar()
     PlayerChar = LP.Character
     if PlayerChar then
@@ -31,23 +45,44 @@ local function updateChar()
     end
 end
 
--- Killer detection: any other player with HumanoidRootPart
-local function getNearestKillerDistance()
-    if not RootPart then return math.huge end
-    local nearest = math.huge
+-- Killer detection: only actual killers
+local function getNearestKiller()
+    if not RootPart then return nil, math.huge end
+    local nearestObj = nil
+    local nearestDist = math.huge
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= LP and plr.Character then
-            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+            local char = plr.Character
+            local hrp = char:FindFirstChild("HumanoidRootPart")
             if hrp then
-                local dist = (RootPart.Position - hrp.Position).magnitude
-                if dist < nearest then nearest = dist end
+                local name = plr.Name:lower()
+                local isKiller = false
+                -- Check killer name list
+                for _, k in pairs(KILLER_NAMES) do
+                    if name:find(k) then isKiller = true; break end
+                end
+                -- Check team
+                if not isKiller and plr.Team and plr.Team.Name:lower():find("killer") then
+                    isKiller = true
+                end
+                -- Check tag
+                if not isKiller and char:FindFirstChild("KillerTag") then
+                    isKiller = true
+                end
+                if isKiller then
+                    local dist = (RootPart.Position - hrp.Position).magnitude
+                    if dist < nearestDist then
+                        nearestDist = dist
+                        nearestObj = hrp
+                    end
+                end
             end
         end
     end
-    return nearest
+    return nearestObj, nearestDist
 end
 
--- Generator scanning – look for ProximityPrompt with "Generator" in name
+-- Generator scanning: find ProximityPrompt on generator parts
 local function scanGenerators()
     local newGens = {}
     for _, prompt in pairs(workspace:GetDescendants()) do
@@ -67,66 +102,144 @@ local function scanGenerators()
     return #Generators
 end
 
--- Interact with generator using Prompt() – no key holding needed
-local function interactWithGenerator(gen)
-    print("Interacting with generator: " .. gen.Name)
-    local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
-    if prompt then
-        pcall(function()
-            prompt:Prompt()
-        end)
-        wait(0.5)
-        return true
+-- Pathfinding move to a position (avoids walls)
+local function pathfindTo(targetPos)
+    if not RootPart or not Humanoid then return false end
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 2.0,
+        AgentHeight = 5.0,
+        AgentCanJump = true,
+        AgentMaxSlope = 60,
+        WaypointSpacing = 3.0
+    })
+    local success = pcall(function()
+        path:ComputeAsync(RootPart.Position, targetPos)
+    end)
+    if not success or path.Status ~= Enum.PathStatus.Success then
+        -- Fallback to straight line
+        Humanoid:MoveTo(targetPos)
+        return false
+    end
+    local waypoints = path:GetWaypoints()
+    for _, wp in ipairs(waypoints) do
+        if not AIEnabled then break end
+        if wp.Action == Enum.PathWaypointAction.Jump then
+            Humanoid.Jump = true
+            wait(0.2)
+        end
+        Humanoid:MoveTo(wp.Position)
+        -- Wait until we reach the waypoint or timeout (2 sec)
+        local start = tick()
+        while (RootPart.Position - wp.Position).magnitude > 3 do
+            if tick() - start > 2 then break end
+            wait(0.05)
+        end
+    end
+    return true
+end
+
+-- Hold F key for 2 seconds using VirtualInput
+local function holdF()
+    pcall(function()
+        VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+    end)
+    wait(2)
+    pcall(function()
+        VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+    end)
+end
+
+-- Check if minigame UI is open
+local function isMinigameOpen()
+    local playerGui = LP:FindFirstChild("PlayerGui")
+    if not playerGui then return false end
+    for _, gui in pairs(playerGui:GetDescendants()) do
+        if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
+            return true
+        end
     end
     return false
 end
 
--- Simple movement
-local function moveToGenerator(gen)
-    if not RootPart or not Humanoid then return end
-    Humanoid:MoveTo(gen.Position)
+-- Solve minigame: click all ImageButton/TextButton in order
+local function solveMinigame()
+    local playerGui = LP:FindFirstChild("PlayerGui")
+    if not playerGui then return false end
+    local minigameFrame = nil
+    for _, gui in pairs(playerGui:GetDescendants()) do
+        if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
+            minigameFrame = gui
+            break
+        end
+    end
+    if not minigameFrame then return false end
+    local clickables = {}
+    for _, child in pairs(minigameFrame:GetDescendants()) do
+        if (child:IsA("ImageButton") or child:IsA("TextButton")) and child.Visible then
+            table.insert(clickables, child)
+        end
+    end
+    if #clickables < 2 then return false end
+    -- Sort by position
+    table.sort(clickables, function(a,b)
+        if math.abs(a.AbsolutePosition.Y - b.AbsolutePosition.Y) < 50 then
+            return a.AbsolutePosition.X < b.AbsolutePosition.X
+        else
+            return a.AbsolutePosition.Y < b.AbsolutePosition.Y
+        end
+    end)
+    for _, btn in ipairs(clickables) do
+        local pos = btn.AbsolutePosition + Vector2.new(btn.AbsoluteSize.X/2, btn.AbsoluteSize.Y/2)
+        pcall(function()
+            VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+            wait(0.05)
+            VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+        end)
+        wait(0.1)
+    end
+    return true
 end
 
--- Flee from killer (straight line)
-local function fleeFromKiller()
-    if not RootPart or not Humanoid then return end
-    local nearestDist = math.huge
-    local killerPos = nil
-    for _, plr in pairs(Players:GetPlayers()) do
-        if plr ~= LP and plr.Character then
-            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local dist = (RootPart.Position - hrp.Position).magnitude
-                if dist < nearestDist then
-                    nearestDist = dist
-                    killerPos = hrp.Position
+-- Interact with generator: try prompt, then hold F, then solve
+local function interactWithGenerator(gen)
+    print("Interacting with generator: " .. gen.Name)
+    -- First try ProximityPrompt:Prompt()
+    local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
+    if prompt then
+        pcall(function() prompt:Prompt() end)
+        wait(0.5)
+    end
+    -- Then hold F for 2 seconds
+    holdF()
+    wait(0.5)
+    if isMinigameOpen() then
+        print("Minigame opened, solving...")
+        local solved = solveMinigame()
+        if solved then
+            -- Wait for UI to close (max 10 seconds)
+            for i = 1, 30 do
+                wait(0.3)
+                if not isMinigameOpen() then
+                    print("Generator completed!")
+                    CompletedGenerators[gen] = true
+                    return true
                 end
             end
         end
+    else
+        print("Minigame did not open")
     end
-    if killerPos then
-        local direction = (RootPart.Position - killerPos).unit
-        local fleePos = RootPart.Position + direction * 40
-        Humanoid:MoveTo(fleePos)
-    end
+    return false
 end
 
--- Infinite stamina – only walk speed increase (safe)
-local function applyStamina()
-    if not Humanoid then return end
-    if Humanoid.WalkSpeed < WALK_SPEED then
-        Humanoid.WalkSpeed = WALK_SPEED
-    end
-    -- Try to set attribute (safe)
-    pcall(function()
-        Humanoid:SetAttribute("Sprinting", true)
-    end)
-    -- Remove blur effect if possible
-    for _, effect in pairs(game:GetService("Lighting"):GetChildren()) do
-        if effect:IsA("BlurEffect") then
-            pcall(function() effect.Enabled = false end)
-        end
-    end
+-- Flee from killer using pathfinding (away direction)
+local function fleeFromKiller(killerPos)
+    if not RootPart or not Humanoid then return end
+    local direction = (RootPart.Position - killerPos).unit
+    local fleePos = RootPart.Position + direction * 40
+    -- Clamp to map bounds
+    fleePos = Vector3.new(math.clamp(fleePos.X, -500, 500), fleePos.Y, math.clamp(fleePos.Z, -500, 500))
+    pathfindTo(fleePos)
 end
 
 -- Main AI loop
@@ -138,10 +251,10 @@ local function aiTick()
     end
 
     -- 1. Killer avoidance
-    local killerDist = getNearestKillerDistance()
-    if killerDist <= SliderValue then
+    local killerObj, killerDist = getNearestKiller()
+    if killerObj and killerDist <= SliderValue then
         CurrentAction = "Fleeing"
-        fleeFromKiller()
+        fleeFromKiller(killerObj.Position)
         return
     end
 
@@ -166,18 +279,29 @@ local function aiTick()
     if nearestGen then
         if nearestDist > 5 then
             CurrentAction = "Moving to generator"
-            moveToGenerator(nearestGen)
+            pathfindTo(nearestGen.Position)
         else
             CurrentAction = "Repairing"
             local success = interactWithGenerator(nearestGen)
             if success then
-                CompletedGenerators[nearestGen] = true
                 for i, g in pairs(Generators) do
                     if g == nearestGen then table.remove(Generators, i); break end
                 end
             end
             wait(1)
         end
+    end
+end
+
+-- Infinite stamina (walk speed)
+local function applyStamina()
+    if not Humanoid then return end
+    if Humanoid.WalkSpeed < WALK_SPEED then
+        Humanoid.WalkSpeed = WALK_SPEED
+    end
+    pcall(function() Humanoid:SetAttribute("Sprinting", true) end)
+    for _, effect in pairs(game:GetService("Lighting"):GetChildren()) do
+        if effect:IsA("BlurEffect") then pcall(function() effect.Enabled = false end) end
     end
 end
 
@@ -203,7 +327,7 @@ spawn(function()
     end
 end)
 
--- GUI (same as minimal test, but with AI controls)
+-- GUI
 local function createHub()
     local sg = Instance.new("ScreenGui")
     sg.Name = "ForsakenAI"
@@ -390,19 +514,18 @@ local function createHub()
         end
     end)
 
-    -- Update status every second
     spawn(function()
         while ScriptActive and sg do
             wait(1)
             if AIEnabled then
-                local kd = getNearestKillerDistance()
+                local _, kd = getNearestKiller()
                 status.Text = string.format("Gens: %d | Killer: %.0f studs | Alert: %d", #Generators, kd, SliderValue)
                 actionLabel.Text = "Action: " .. CurrentAction
             end
         end
     end)
 
-    -- Draggable title
+    -- Draggable
     local dragStart, dragPos, dragging = nil
     title.InputBegan:Connect(function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -425,4 +548,4 @@ end
 -- Start
 updateChar()
 createHub()
-print("Forsaken AI loaded. Toggle ON to start.")
+print("Forsaken AI loaded. Pathfinding active, F key hold for generators, killer detection filtered.")
