@@ -1,17 +1,15 @@
 --[[
-    FORSAKEN AI – PATHFINDING + GENERATOR FIX
-    - Uses Roblox PathfindingService to avoid walls
-    - Holds F for 2 seconds, then prompts again if needed
-    - Killer detection based on names/team (ignores survivors)
+    FORSAKEN AI – SIMPLE MOVEMENT + RELIABLE GENERATOR OPENING
+    - No pathfinding (to prevent backing up)
+    - Hold F for 2 seconds at generator
+    - Detect minigame UI and solve it
+    - Killer detection (ignores survivors)
 --]]
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local PathfindingService = game:GetService("PathfindingService")
-local LP = Players.LocalPlayer
-
--- Key simulation (Xeno supports VirtualInput)
 local VirtualInput = game:GetService("VirtualInput")
+local LP = Players.LocalPlayer
 
 -- State
 local AIEnabled = false
@@ -21,11 +19,12 @@ local PlayerChar, Humanoid, RootPart
 local Generators = {}
 local CompletedGenerators = {}
 local CurrentAction = "Idle"
+local IsInteracting = false   -- prevent multiple interactions
 
 -- Constants
 local WALK_SPEED = 24
 
--- Killer names (based on Forsaken wiki)
+-- Killer names list
 local KILLER_NAMES = {
     "slasher", "c00lkidd", "john doe", "1x1x1x1", "noli", "guest 666", "nosferatu",
     "subject 0", "pursuer", "killer kyle", "stitchhare", "mafioso", "bluudud",
@@ -45,7 +44,7 @@ local function updateChar()
     end
 end
 
--- Killer detection: only actual killers
+-- Killer detection (only actual killers)
 local function getNearestKiller()
     if not RootPart then return nil, math.huge end
     local nearestObj = nil
@@ -57,18 +56,11 @@ local function getNearestKiller()
             if hrp then
                 local name = plr.Name:lower()
                 local isKiller = false
-                -- Check killer name list
                 for _, k in pairs(KILLER_NAMES) do
                     if name:find(k) then isKiller = true; break end
                 end
-                -- Check team
-                if not isKiller and plr.Team and plr.Team.Name:lower():find("killer") then
-                    isKiller = true
-                end
-                -- Check tag
-                if not isKiller and char:FindFirstChild("KillerTag") then
-                    isKiller = true
-                end
+                if not isKiller and plr.Team and plr.Team.Name:lower():find("killer") then isKiller = true end
+                if not isKiller and char:FindFirstChild("KillerTag") then isKiller = true end
                 if isKiller then
                     local dist = (RootPart.Position - hrp.Position).magnitude
                     if dist < nearestDist then
@@ -102,43 +94,7 @@ local function scanGenerators()
     return #Generators
 end
 
--- Pathfinding move to a position (avoids walls)
-local function pathfindTo(targetPos)
-    if not RootPart or not Humanoid then return false end
-    local path = PathfindingService:CreatePath({
-        AgentRadius = 2.0,
-        AgentHeight = 5.0,
-        AgentCanJump = true,
-        AgentMaxSlope = 60,
-        WaypointSpacing = 3.0
-    })
-    local success = pcall(function()
-        path:ComputeAsync(RootPart.Position, targetPos)
-    end)
-    if not success or path.Status ~= Enum.PathStatus.Success then
-        -- Fallback to straight line
-        Humanoid:MoveTo(targetPos)
-        return false
-    end
-    local waypoints = path:GetWaypoints()
-    for _, wp in ipairs(waypoints) do
-        if not AIEnabled then break end
-        if wp.Action == Enum.PathWaypointAction.Jump then
-            Humanoid.Jump = true
-            wait(0.2)
-        end
-        Humanoid:MoveTo(wp.Position)
-        -- Wait until we reach the waypoint or timeout (2 sec)
-        local start = tick()
-        while (RootPart.Position - wp.Position).magnitude > 3 do
-            if tick() - start > 2 then break end
-            wait(0.05)
-        end
-    end
-    return true
-end
-
--- Hold F key for 2 seconds using VirtualInput
+-- Hold F key for 2 seconds
 local function holdF()
     pcall(function()
         VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
@@ -161,7 +117,7 @@ local function isMinigameOpen()
     return false
 end
 
--- Solve minigame: click all ImageButton/TextButton in order
+-- Solve minigame by clicking all buttons
 local function solveMinigame()
     local playerGui = LP:FindFirstChild("PlayerGui")
     if not playerGui then return false end
@@ -180,7 +136,6 @@ local function solveMinigame()
         end
     end
     if #clickables < 2 then return false end
-    -- Sort by position
     table.sort(clickables, function(a,b)
         if math.abs(a.AbsolutePosition.Y - b.AbsolutePosition.Y) < 50 then
             return a.AbsolutePosition.X < b.AbsolutePosition.X
@@ -200,28 +155,24 @@ local function solveMinigame()
     return true
 end
 
--- Interact with generator: try prompt, then hold F, then solve
+-- Interact with generator: hold F, check UI, solve if opened
 local function interactWithGenerator(gen)
+    if IsInteracting then return false end
+    IsInteracting = true
     print("Interacting with generator: " .. gen.Name)
-    -- First try ProximityPrompt:Prompt()
-    local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
-    if prompt then
-        pcall(function() prompt:Prompt() end)
-        wait(0.5)
-    end
-    -- Then hold F for 2 seconds
     holdF()
     wait(0.5)
     if isMinigameOpen() then
         print("Minigame opened, solving...")
         local solved = solveMinigame()
         if solved then
-            -- Wait for UI to close (max 10 seconds)
+            -- Wait for UI to close
             for i = 1, 30 do
                 wait(0.3)
                 if not isMinigameOpen() then
                     print("Generator completed!")
                     CompletedGenerators[gen] = true
+                    IsInteracting = false
                     return true
                 end
             end
@@ -229,17 +180,46 @@ local function interactWithGenerator(gen)
     else
         print("Minigame did not open")
     end
+    IsInteracting = false
     return false
 end
 
--- Flee from killer using pathfinding (away direction)
+-- Simple movement (no pathfinding) with stuck detection
+local function moveToGenerator(gen)
+    if not RootPart or not Humanoid then return end
+    local startPos = RootPart.Position
+    Humanoid:MoveTo(gen.Position)
+    -- Wait up to 3 seconds to see if we're stuck
+    wait(1)
+    local newDist = (RootPart.Position - gen.Position).magnitude
+    if newDist > (RootPart.Position - startPos).magnitude + 1 then
+        -- Not making progress, try a different direction
+        local randomDir = Vector3.new(math.random(-10,10), 0, math.random(-10,10)).unit
+        Humanoid:MoveTo(RootPart.Position + randomDir * 5)
+        wait(0.5)
+        Humanoid:MoveTo(gen.Position)
+    end
+end
+
+-- Flee from killer (straight line)
 local function fleeFromKiller(killerPos)
     if not RootPart or not Humanoid then return end
     local direction = (RootPart.Position - killerPos).unit
     local fleePos = RootPart.Position + direction * 40
-    -- Clamp to map bounds
     fleePos = Vector3.new(math.clamp(fleePos.X, -500, 500), fleePos.Y, math.clamp(fleePos.Z, -500, 500))
-    pathfindTo(fleePos)
+    Humanoid:MoveTo(fleePos)
+end
+
+-- Infinite stamina (walk speed only)
+local function applyStamina()
+    if not Humanoid then return end
+    if Humanoid.WalkSpeed < WALK_SPEED then
+        Humanoid.WalkSpeed = WALK_SPEED
+    end
+    pcall(function() Humanoid:SetAttribute("Sprinting", true) end)
+    for _, effect in pairs(game:GetService("Lighting"):GetChildren()) do
+        if effect:IsA("BlurEffect") then effect.Enabled = false end
+    end
 end
 
 -- Main AI loop
@@ -255,6 +235,7 @@ local function aiTick()
     if killerObj and killerDist <= SliderValue then
         CurrentAction = "Fleeing"
         fleeFromKiller(killerObj.Position)
+        wait(0.5)
         return
     end
 
@@ -279,29 +260,18 @@ local function aiTick()
     if nearestGen then
         if nearestDist > 5 then
             CurrentAction = "Moving to generator"
-            pathfindTo(nearestGen.Position)
+            moveToGenerator(nearestGen)
         else
             CurrentAction = "Repairing"
             local success = interactWithGenerator(nearestGen)
             if success then
+                -- Remove from list
                 for i, g in pairs(Generators) do
                     if g == nearestGen then table.remove(Generators, i); break end
                 end
             end
             wait(1)
         end
-    end
-end
-
--- Infinite stamina (walk speed)
-local function applyStamina()
-    if not Humanoid then return end
-    if Humanoid.WalkSpeed < WALK_SPEED then
-        Humanoid.WalkSpeed = WALK_SPEED
-    end
-    pcall(function() Humanoid:SetAttribute("Sprinting", true) end)
-    for _, effect in pairs(game:GetService("Lighting"):GetChildren()) do
-        if effect:IsA("BlurEffect") then pcall(function() effect.Enabled = false end) end
     end
 end
 
@@ -327,7 +297,7 @@ spawn(function()
     end
 end)
 
--- GUI
+-- GUI (same as before)
 local function createHub()
     local sg = Instance.new("ScreenGui")
     sg.Name = "ForsakenAI"
@@ -362,7 +332,6 @@ local function createHub()
     toggle.Parent = frame
     Instance.new("UICorner").CornerRadius = UDim.new(0, 8)
 
-    -- Slider
     local sliderFrame = Instance.new("Frame")
     sliderFrame.Size = UDim2.new(0, 260, 0, 50)
     sliderFrame.Position = UDim2.new(0.5, -130, 0, 110)
@@ -525,7 +494,7 @@ local function createHub()
         end
     end)
 
-    -- Draggable
+    -- Draggable title
     local dragStart, dragPos, dragging = nil
     title.InputBegan:Connect(function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -548,4 +517,4 @@ end
 -- Start
 updateChar()
 createHub()
-print("Forsaken AI loaded. Pathfinding active, F key hold for generators, killer detection filtered.")
+print("Forsaken AI loaded (simple movement, no pathfinding).")
