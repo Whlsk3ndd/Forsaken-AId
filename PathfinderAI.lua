@@ -1,32 +1,20 @@
 --[[
-    ███████╗ ██████╗ ██████╗ ███████╗ █████╗ ██╗  ██╗███████╗███╗   ██╗
-    ██╔════╝██╔═══██╗██╔══██╗██╔════╝██╔══██╗██║ ██╔╝██╔════╝████╗  ██║
-    ███████╗██║   ██║██████╔╝█████╗  ███████║█████╔╝ █████╗  ██╔██╗ ██║
-    ╚════██║██║   ██║██╔══██╗██╔══╝  ██╔══██║██╔═██╗ ██╔══╝  ██║╚██╗██║
-    ███████║╚██████╔╝██║  ██║██║     ██║  ██║██║  ██╗███████╗██║ ╚████║
-    ╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝
-
-    ULTIMATE FORSAKEN AI - STABLE EDITION
-    + getgenv() LoadTime delay
-    + No crashing (pcall safety)
-    + Mouse drag for minigame (click & drag dots)
-    + Rejoin button + Cool GUI
+    FORSAKEN AI - FINAL STABLE
+    + Forces sprint animation (Humanoid.Sprint = true)
+    + Prevents character freeze (throttled movement)
+    + Detailed generator interaction logs
+    + Rejoin button, cool GUI
 --]]
 
--- // GETGENV SETTINGS (safe) //
+-- // GETGENV SETTINGS //
 if getgenv then
-    getgenv().LoadTime = getgenv().LoadTime or "5"      -- Delay before loading
-    getgenv().DiscordWebhook = getgenv().DiscordWebhook or ""
-    getgenv().GeneratorTime = getgenv().GeneratorTime or "2.5"  -- Hold time
+    getgenv().LoadTime = getgenv().LoadTime or "3"
+    getgenv().GeneratorTime = getgenv().GeneratorTime or "2.5"
 end
+local loadTime = tonumber(getgenv and getgenv().LoadTime or 3) or 3
+if loadTime > 0 then wait(loadTime) end
 
-local loadTime = tonumber(getgenv and getgenv().LoadTime or 5) or 5
-if loadTime > 0 then
-    print("Waiting " .. loadTime .. " seconds before loading...")
-    wait(loadTime)
-end
-
--- // SERVICES // --
+-- // SERVICES //
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local VirtualInput = game:GetService("VirtualInput")
@@ -34,7 +22,7 @@ local TeleportService = game:GetService("TeleportService")
 local TweenService = game:GetService("TweenService")
 local LP = Players.LocalPlayer
 
--- // STATE // --
+-- // STATE //
 local AIEnabled = false
 local ScriptActive = true
 local SliderValue = 40
@@ -43,32 +31,40 @@ local Generators = {}
 local CompletedGenerators = {}
 local CurrentAction = "Idle"
 local IsInteracting = false
-
--- // CONSTANTS // --
-local WALK_SPEED = 24
+local LastMoveTime = 0
 local HOLD_TIME = tonumber(getgenv and getgenv().GeneratorTime or 2.5) or 2.5
 
--- // KILLER NAMES // --
+-- // CONSTANTS //
+local WALK_SPEED = 24
+
+-- // KILLER NAMES //
 local KILLER_NAMES = {
     "slasher", "c00lkidd", "john doe", "1x1x1x1", "noli", "guest 666", "nosferatu",
     "subject 0", "pursuer", "killer kyle", "stitchhare", "mafioso", "bluudud",
     "divadayo", "gasharpoon", "annihilation", "aberrant", "admin romeo", "narrator"
 }
 
--- // SAFE PRINT (prevents crashes) //
-local function DebugLog(msg)
-    pcall(function() print("[AI] " .. msg) end)
+-- // SAFE PRINT //
+local function DebugLog(msg, level)
+    level = level or "INFO"
+    pcall(function() print(string.format("[%s] %s", level, msg)) end)
 end
 
--- // UPDATE CHARACTER // --
+-- // UPDATE CHARACTER + SPRINT ANIMATION //
 local function updateChar()
     pcall(function()
         PlayerChar = LP.Character
         if PlayerChar then
             Humanoid = PlayerChar:FindFirstChildOfClass("Humanoid")
             RootPart = PlayerChar:FindFirstChild("HumanoidRootPart")
-            if Humanoid and Humanoid.WalkSpeed < WALK_SPEED then
-                Humanoid.WalkSpeed = WALK_SPEED
+            if Humanoid then
+                -- Set walk speed and sprint animation
+                if Humanoid.WalkSpeed < WALK_SPEED then
+                    Humanoid.WalkSpeed = WALK_SPEED
+                end
+                Humanoid.Sprint = true
+                Humanoid:SetAttribute("Sprinting", true)
+                Humanoid:SetAttribute("Running", true)
             end
         end
     end)
@@ -125,12 +121,11 @@ local function scanGenerators()
     return #Generators
 end
 
--- // MOUSE DRAG FUNCTION (for minigame) // --
+-- // MOUSE DRAG (for minigame) // --
 local function dragMouse(fromPos, toPos)
     pcall(function()
         VirtualInput:SendMouseButtonEvent(fromPos.X, fromPos.Y, 0, true, game, 0)
         wait(0.05)
-        -- Smooth drag
         for t = 0, 1, 0.1 do
             local x = fromPos.X + (toPos.X - fromPos.X) * t
             local y = fromPos.Y + (toPos.Y - fromPos.Y) * t
@@ -144,7 +139,7 @@ end
 -- // MINIGAME SOLVER (with drag) // --
 local function solveMinigame()
     local playerGui = LP:FindFirstChild("PlayerGui")
-    if not playerGui then return false end
+    if not playerGui then DebugLog("No PlayerGui found", "ERROR"); return false end
     local minigameFrame = nil
     for _, gui in pairs(playerGui:GetDescendants()) do
         if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
@@ -152,9 +147,10 @@ local function solveMinigame()
             break
         end
     end
-    if not minigameFrame then return false end
+    if not minigameFrame then DebugLog("Minigame frame not found", "ERROR"); return false end
+    DebugLog("Minigame frame found: " .. minigameFrame.Name)
 
-    -- Find all numbered elements (dots)
+    -- Find all numbered dots (TextLabel, TextButton, ImageLabel with numbers)
     local dots = {}
     for _, child in pairs(minigameFrame:GetDescendants()) do
         if child.Visible then
@@ -174,14 +170,17 @@ local function solveMinigame()
             end
         end
     end
+    DebugLog("Found " .. #dots .. " numbered dots")
+
     if #dots < 2 then
-        -- Fallback: click all buttons in order without drag
+        -- Fallback: click all buttons (ImageButton/TextButton) in order
         local buttons = {}
         for _, child in pairs(minigameFrame:GetDescendants()) do
             if (child:IsA("ImageButton") or child:IsA("TextButton")) and child.Visible then
                 table.insert(buttons, child)
             end
         end
+        DebugLog("Fallback: found " .. #buttons .. " buttons")
         if #buttons < 2 then return false end
         table.sort(buttons, function(a,b)
             if math.abs(a.AbsolutePosition.Y - b.AbsolutePosition.Y) < 50 then
@@ -224,20 +223,20 @@ local function solveMinigame()
     return true
 end
 
--- // INTERACT WITH GENERATOR (Hold F) // --
+-- // INTERACT WITH GENERATOR // --
 local function interactWithGenerator(gen)
     if IsInteracting then return false end
     IsInteracting = true
     DebugLog("Interacting with generator: " .. gen.Name)
 
-    -- Try ProximityPrompt:Prompt()
+    -- Method 1: ProximityPrompt:Prompt()
     local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
     if prompt then
         pcall(function() prompt:Prompt() end)
         wait(0.5)
     end
 
-    -- Hold F key
+    -- Method 2: Hold F key
     pcall(function() VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game) end)
     wait(HOLD_TIME)
     pcall(function() VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
@@ -259,7 +258,7 @@ local function interactWithGenerator(gen)
     end
 
     if uiOpened then
-        DebugLog("Minigame opened – solving with drag")
+        DebugLog("Minigame UI opened – solving")
         local solved = solveMinigame()
         if solved then
             -- Wait for UI to close
@@ -276,26 +275,30 @@ local function interactWithGenerator(gen)
                     end
                 end
                 if not stillOpen then
-                    DebugLog("Generator completed!")
+                    DebugLog("Generator completed!", "SUCCESS")
                     CompletedGenerators[gen] = true
                     IsInteracting = false
                     return true
                 end
             end
+            DebugLog("Minigame UI did not close after solving", "WARN")
         else
-            DebugLog("Minigame solver failed")
+            DebugLog("Minigame solver failed (no clickables or drag failed)", "ERROR")
         end
     else
-        DebugLog("Minigame UI did not open")
+        DebugLog("Minigame UI did not open after F key hold", "ERROR")
     end
 
     IsInteracting = false
     return false
 end
 
--- // SIMPLE MOVEMENT // --
+-- // MOVEMENT (throttled to prevent freeze) // --
 local function moveToGenerator(gen)
     if not RootPart or not Humanoid then return end
+    local now = tick()
+    if now - LastMoveTime < 0.3 then return end
+    LastMoveTime = now
     Humanoid:MoveTo(gen.Position)
 end
 
@@ -308,13 +311,17 @@ local function fleeFromKiller(killerPos)
     Humanoid:MoveTo(fleePos)
 end
 
--- // INFINITE STAMINA (safe) // --
+-- // INFINITE STAMINA (with sprint animation) // --
 local function applyStamina()
     if not Humanoid then return end
     if Humanoid.WalkSpeed < WALK_SPEED then
         Humanoid.WalkSpeed = WALK_SPEED
     end
-    pcall(function() Humanoid:SetAttribute("Sprinting", true) end)
+    Humanoid.Sprint = true
+    pcall(function()
+        Humanoid:SetAttribute("Sprinting", true)
+        Humanoid:SetAttribute("Running", true)
+    end)
     for _, effect in pairs(game:GetService("Lighting"):GetChildren()) do
         if effect:IsA("BlurEffect") then effect.Enabled = false end
     end
@@ -397,7 +404,7 @@ end)
 -- // COOL GUI // --
 local function createHub()
     local sg = Instance.new("ScreenGui")
-    sg.Name = "ForsakenAI_Stable"
+    sg.Name = "ForsakenAI_Final"
     sg.Parent = game.CoreGui
     sg.ResetOnSpawn = false
 
@@ -637,4 +644,4 @@ end
 -- // START // --
 updateChar()
 createHub()
-DebugLog("Stable AI loaded (no crashes). Use the GUI to toggle on/off. Console spam from ActorNetwork is from the game, not this script.")
+DebugLog("Final AI loaded with sprint animation. Use GUI to toggle. Console spam from ActorNetwork is game bug, ignore.")
