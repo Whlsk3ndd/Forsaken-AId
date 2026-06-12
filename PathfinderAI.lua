@@ -1,18 +1,10 @@
 --[[
-    FORSAKEN AI – STABLE VERSION
-    - Guaranteed to load (no syntax errors)
-    - Generator interaction with F key hold
-    - Simple flee (straight line, no pathfinding errors)
-    - Works with Xeno Executor
+    FORSAKEN AI – XENO COMPATIBLE
+    Uses only standard Roblox APIs – no VirtualInput, no TeleportService
 --]]
 
--- Services
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local VirtualInput = game:GetService("VirtualInput")
-local TeleportService = game:GetService("TeleportService")
-local Lighting = game:GetService("Lighting")
-
 local LP = Players.LocalPlayer
 
 -- State
@@ -23,13 +15,9 @@ local PlayerChar, Humanoid, RootPart
 local Generators = {}
 local CompletedGenerators = {}
 local CurrentAction = "Idle"
-local CurrentMap = "Unknown"
 
 -- Constants
 local WALK_SPEED = 24
-
--- Print to confirm script loaded
-print("Forsaken AI script loaded. Toggle on to start.")
 
 -- Helper: update character reference
 local function updateChar()
@@ -43,21 +31,7 @@ local function updateChar()
     end
 end
 
--- Simple map detection (finds known parts)
-local function detectMap()
-    if workspace:FindFirstChild("Castle", true) then
-        CurrentMap = "Brandon6875935's Place"
-    elseif workspace:FindFirstChild("YorickHouse", true) then
-        CurrentMap = "Yorick's Resting Place"
-    elseif workspace:FindFirstChild("JailMountain", true) then
-        CurrentMap = "Glass Houses"
-    else
-        CurrentMap = "Unknown"
-    end
-    return CurrentMap
-end
-
--- Killer detection: any other player with a HumanoidRootPart
+-- Killer detection: any other player with HumanoidRootPart
 local function getNearestKillerDistance()
     if not RootPart then return math.huge end
     local nearest = math.huge
@@ -73,7 +47,7 @@ local function getNearestKillerDistance()
     return nearest
 end
 
--- Generator scanning: look for ProximityPrompt on parts named "Generator"
+-- Generator scanning – look for ProximityPrompt with "Generator" in name
 local function scanGenerators()
     local newGens = {}
     for _, prompt in pairs(workspace:GetDescendants()) do
@@ -93,147 +67,69 @@ local function scanGenerators()
     return #Generators
 end
 
--- Minigame solver: clicks any button inside the repair frame
-local function solveMinigame()
-    local minigameFrame = nil
-    for i = 1, 30 do
-        wait(0.1)
-        local playerGui = LP:FindFirstChild("PlayerGui")
-        if playerGui then
-            for _, gui in pairs(playerGui:GetDescendants()) do
-                if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                    minigameFrame = gui
-                    break
-                end
-            end
-        end
-        if minigameFrame then break end
-    end
-    if not minigameFrame then return false end
-
-    -- Find all clickable elements (buttons)
-    local clickables = {}
-    for _, child in pairs(minigameFrame:GetDescendants()) do
-        if child:IsA("ImageButton") or child:IsA("TextButton") then
-            if child.Visible then
-                table.insert(clickables, child)
-            end
-        end
-    end
-    if #clickables < 2 then return false end
-
-    -- Sort by position (left to right, top to bottom)
-    table.sort(clickables, function(a,b)
-        if math.abs(a.AbsolutePosition.Y - b.AbsolutePosition.Y) < 50 then
-            return a.AbsolutePosition.X < b.AbsolutePosition.X
-        else
-            return a.AbsolutePosition.Y < b.AbsolutePosition.Y
-        end
-    end)
-
-    -- Click each one
-    for _, btn in ipairs(clickables) do
-        local pos = btn.AbsolutePosition + Vector2.new(btn.AbsoluteSize.X/2, btn.AbsoluteSize.Y/2)
-        pcall(function()
-            VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
-            wait(0.05)
-            VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-        end)
-        wait(0.1)
-    end
-    return true
-end
-
--- Interact with generator: hold F key for 2 seconds
+-- Interact with generator using Prompt() – no key holding needed
 local function interactWithGenerator(gen)
     print("Interacting with generator: " .. gen.Name)
-    -- Hold F key
-    pcall(function()
-        VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
-    end)
-    local uiOpened = false
-    for i = 1, 30 do
-        wait(0.1)
-        local playerGui = LP:FindFirstChild("PlayerGui")
-        if playerGui then
-            for _, gui in pairs(playerGui:GetDescendants()) do
-                if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                    uiOpened = true
-                    break
-                end
-            end
-        end
-        if uiOpened then break end
-    end
-    pcall(function()
-        VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
-    end)
-
-    if uiOpened then
-        print("Minigame opened, solving...")
-        local solved = solveMinigame()
-        if solved then
-            -- Wait for UI to close
-            for i = 1, 40 do
-                wait(0.2)
-                local found = false
-                local playerGui = LP:FindFirstChild("PlayerGui")
-                if playerGui then
-                    for _, gui in pairs(playerGui:GetDescendants()) do
-                        if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                            found = true
-                            break
-                        end
-                    end
-                end
-                if not found then
-                    print("Generator completed!")
-                    CompletedGenerators[gen] = true
-                    return true
-                end
-            end
-        end
-    else
-        print("Minigame did not open")
+    local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
+    if prompt then
+        pcall(function()
+            prompt:Prompt()
+        end)
+        wait(0.5)
+        return true
     end
     return false
 end
 
--- Simple movement (no pathfinding to avoid errors)
+-- Simple movement
 local function moveToGenerator(gen)
     if not RootPart or not Humanoid then return end
     Humanoid:MoveTo(gen.Position)
 end
 
--- Flee from killer (straight line away)
-local function fleeFromKiller(killerPos)
+-- Flee from killer (straight line)
+local function fleeFromKiller()
     if not RootPart or not Humanoid then return end
-    local direction = (RootPart.Position - killerPos).unit
-    local fleePos = RootPart.Position + direction * 40
-    Humanoid:MoveTo(fleePos)
+    local nearestDist = math.huge
+    local killerPos = nil
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LP and plr.Character then
+            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local dist = (RootPart.Position - hrp.Position).magnitude
+                if dist < nearestDist then
+                    nearestDist = dist
+                    killerPos = hrp.Position
+                end
+            end
+        end
+    end
+    if killerPos then
+        local direction = (RootPart.Position - killerPos).unit
+        local fleePos = RootPart.Position + direction * 40
+        Humanoid:MoveTo(fleePos)
+    end
 end
 
--- Infinite stamina
+-- Infinite stamina – only walk speed increase (safe)
 local function applyStamina()
     if not Humanoid then return end
     if Humanoid.WalkSpeed < WALK_SPEED then
         Humanoid.WalkSpeed = WALK_SPEED
     end
-    local staminaVal = Humanoid:FindFirstChild("Stamina")
-    if staminaVal and staminaVal:IsA("NumberValue") then
-        pcall(function()
-            setreadonly(staminaVal, false)
-            staminaVal.Value = 100
-            setreadonly(staminaVal, true)
-        end)
-    end
-    Humanoid:SetAttribute("Sprinting", true)
-    for _, effect in pairs(Lighting:GetChildren()) do
-        if effect:IsA("BlurEffect") then effect.Enabled = false end
+    -- Try to set attribute (safe)
+    pcall(function()
+        Humanoid:SetAttribute("Sprinting", true)
+    end)
+    -- Remove blur effect if possible
+    for _, effect in pairs(game:GetService("Lighting"):GetChildren()) do
+        if effect:IsA("BlurEffect") then
+            pcall(function() effect.Enabled = false end)
+        end
     end
 end
 
--- Main AI loop (runs every 0.5 seconds)
+-- Main AI loop
 local function aiTick()
     if not AIEnabled then return end
     if not PlayerChar or not Humanoid or not RootPart then
@@ -245,20 +141,7 @@ local function aiTick()
     local killerDist = getNearestKillerDistance()
     if killerDist <= SliderValue then
         CurrentAction = "Fleeing"
-        -- Find killer position
-        local killerPos = nil
-        for _, plr in pairs(Players:GetPlayers()) do
-            if plr ~= LP and plr.Character then
-                local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
-                if hrp and (RootPart.Position - hrp.Position).magnitude == killerDist then
-                    killerPos = hrp.Position
-                    break
-                end
-            end
-        end
-        if killerPos then
-            fleeFromKiller(killerPos)
-        end
+        fleeFromKiller()
         return
     end
 
@@ -288,7 +171,7 @@ local function aiTick()
             CurrentAction = "Repairing"
             local success = interactWithGenerator(nearestGen)
             if success then
-                -- Remove from active list
+                CompletedGenerators[nearestGen] = true
                 for i, g in pairs(Generators) do
                     if g == nearestGen then table.remove(Generators, i); break end
                 end
@@ -320,14 +203,7 @@ spawn(function()
     end
 end)
 
-spawn(function()
-    while ScriptActive do
-        wait(3)
-        detectMap()
-    end
-end)
-
--- GUI Hub (simplified but works)
+-- GUI (same as minimal test, but with AI controls)
 local function createHub()
     local sg = Instance.new("ScreenGui")
     sg.Name = "ForsakenAI"
@@ -437,9 +313,20 @@ local function createHub()
     status.TextXAlignment = Enum.TextXAlignment.Left
     status.Parent = frame
 
+    local actionLabel = Instance.new("TextLabel")
+    actionLabel.Size = UDim2.new(1, -20, 0, 20)
+    actionLabel.Position = UDim2.new(0, 10, 0, 215)
+    actionLabel.BackgroundTransparency = 1
+    actionLabel.Text = "Action: Idle"
+    actionLabel.TextColor3 = Color3.fromRGB(150, 150, 200)
+    actionLabel.Font = Enum.Font.Gotham
+    actionLabel.TextSize = 11
+    actionLabel.TextXAlignment = Enum.TextXAlignment.Left
+    actionLabel.Parent = frame
+
     local hideBtn = Instance.new("TextButton")
     hideBtn.Size = UDim2.new(0, 90, 0, 35)
-    hideBtn.Position = UDim2.new(0.05, 0, 0, 230)
+    hideBtn.Position = UDim2.new(0.05, 0, 0, 240)
     hideBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
     hideBtn.Text = "⛔ HIDE"
     hideBtn.TextColor3 = Color3.new(1, 1, 1)
@@ -448,20 +335,9 @@ local function createHub()
     hideBtn.Parent = frame
     Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
 
-    local rejoinBtn = Instance.new("TextButton")
-    rejoinBtn.Size = UDim2.new(0, 90, 0, 35)
-    rejoinBtn.Position = UDim2.new(0.35, 0, 0, 230)
-    rejoinBtn.BackgroundColor3 = Color3.fromRGB(100, 80, 120)
-    rejoinBtn.Text = "🔄 REJOIN"
-    rejoinBtn.TextColor3 = Color3.new(1, 1, 1)
-    rejoinBtn.Font = Enum.Font.GothamBold
-    rejoinBtn.TextSize = 13
-    rejoinBtn.Parent = frame
-    Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
-
     local closeBtn = Instance.new("TextButton")
     closeBtn.Size = UDim2.new(0, 90, 0, 35)
-    closeBtn.Position = UDim2.new(0.65, 0, 0, 230)
+    closeBtn.Position = UDim2.new(0.65, 0, 0, 240)
     closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 60)
     closeBtn.Text = "❌ CLOSE"
     closeBtn.TextColor3 = Color3.new(1, 1, 1)
@@ -492,10 +368,6 @@ local function createHub()
         end
     end)
 
-    rejoinBtn.MouseButton1Click:Connect(function()
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP)
-    end)
-
     closeBtn.MouseButton1Click:Connect(function()
         AIEnabled = false
         ScriptActive = false
@@ -510,7 +382,6 @@ local function createHub()
             toggle.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
             updateChar()
             scanGenerators()
-            detectMap()
             status.Text = "AI ACTIVE"
         else
             toggle.Text = "🔴 AI OFF"
@@ -519,18 +390,19 @@ local function createHub()
         end
     end)
 
-    -- Status updater
+    -- Update status every second
     spawn(function()
         while ScriptActive and sg do
             wait(1)
             if AIEnabled then
                 local kd = getNearestKillerDistance()
                 status.Text = string.format("Gens: %d | Killer: %.0f studs | Alert: %d", #Generators, kd, SliderValue)
+                actionLabel.Text = "Action: " .. CurrentAction
             end
         end
     end)
 
-    -- Draggable
+    -- Draggable title
     local dragStart, dragPos, dragging = nil
     title.InputBegan:Connect(function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -552,6 +424,5 @@ end
 
 -- Start
 updateChar()
-detectMap()
 createHub()
-print("Ready. Toggle AI ON to begin.")
+print("Forsaken AI loaded. Toggle ON to start.")
