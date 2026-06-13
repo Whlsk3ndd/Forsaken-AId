@@ -1,13 +1,13 @@
 --[[
-    FORSAKEN AI – ULTIMATE GENERATOR FIX
-    - Handles info panel, then forces real minigame
-    - Clicks ANY visible button inside the real minigame
-    - Throttled movement, rejoin, cool GUI
+    FORSAKEN AI – FINAL (handles info panel + real minigame)
+    - Holds F longer, closes info panel, then looks for numbered UI
+    - If real minigame not found, clicks generator part
+    - Throttled scanning to prevent freeze
 --]]
 
 if getgenv then
     getgenv().LoadTime = getgenv().LoadTime or "3"
-    getgenv().GeneratorTime = getgenv().GeneratorTime or "3"
+    getgenv().GeneratorTime = getgenv().GeneratorTime or "4"
 end
 wait(tonumber(getgenv and getgenv().LoadTime or 3) or 3)
 
@@ -28,7 +28,8 @@ local CompletedGenerators = {}
 local CurrentAction = "Idle"
 local IsInteracting = false
 local LastMoveTime = 0
-local HOLD_TIME = tonumber(getgenv and getgenv().GeneratorTime or 3) or 3
+local LastGenScan = 0
+local HOLD_TIME = tonumber(getgenv and getgenv().GeneratorTime or 4) or 4
 
 -- Constants
 local WALK_SPEED = 24
@@ -76,6 +77,9 @@ local function getNearestKiller()
 end
 
 local function scanGenerators()
+    local now = tick()
+    if now - LastGenScan < 10 then return #Generators end
+    LastGenScan = now
     local newGens = {}
     pcall(function()
         for _, prompt in pairs(workspace:GetDescendants()) do
@@ -96,14 +100,16 @@ local function scanGenerators()
     return #Generators
 end
 
--- REAL MINIGAME DETECTION (look for frames that contain numbered buttons)
+-- Find the real minigame frame (contains numbered elements)
 local function findRealMinigameFrame()
     local playerGui = LP:FindFirstChild("PlayerGui")
     if not playerGui then return nil end
     for _, gui in pairs(playerGui:GetDescendants()) do
         if gui:IsA("Frame") and gui.Visible then
+            -- Skip the info panel
+            if gui.Name:lower():find("setup") then continue end
             for _, child in pairs(gui:GetDescendants()) do
-                if child:IsA("TextButton") or child:IsA("ImageButton") or child:IsA("TextLabel") then
+                if child:IsA("TextLabel") or child:IsA("TextButton") or child:IsA("ImageLabel") then
                     if tonumber(child.Text) or child.Name:match("%d+") then
                         DebugLog("Real minigame frame found: " .. gui.Name)
                         return gui
@@ -115,11 +121,11 @@ local function findRealMinigameFrame()
     return nil
 end
 
--- BRUTE-FORCE SOLVER FOR REAL MINIGAME
-local function solveRealMinigame(frame)
+-- Brute‑force click all clickable elements in a frame
+local function clickAllElementsInFrame(frame)
     local clickables = {}
     for _, child in pairs(frame:GetDescendants()) do
-        if child.Visible and (child:IsA("ImageButton") or child:IsA("TextButton") or child:IsA("TextLabel")) then
+        if child.Visible and (child:IsA("ImageButton") or child:IsA("TextButton") or child:IsA("TextLabel") or child:IsA("ImageLabel")) then
             if child.AbsoluteSize.X > 10 and child.AbsoluteSize.Y > 10 then
                 table.insert(clickables, child)
             end
@@ -145,13 +151,37 @@ local function solveRealMinigame(frame)
     return true
 end
 
--- INTERACT WITH GENERATOR (handles info panel)
+-- Try to click the "OK" button inside the info panel
+local function closeInfoPanel(panel)
+    for _, btn in pairs(panel:GetDescendants()) do
+        if btn:IsA("TextButton") and (btn.Text:lower():find("ok") or btn.Text:lower():find("close") or btn.Text:lower():find("dismiss")) then
+            local pos = btn.AbsolutePosition + Vector2.new(btn.AbsoluteSize.X/2, btn.AbsoluteSize.Y/2)
+            pcall(function()
+                VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+                wait(0.1)
+                VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+            end)
+            DebugLog("Clicked info panel close button")
+            return true
+        end
+    end
+    -- Fallback: press F again
+    pcall(function()
+        VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+        wait(0.2)
+        VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+    end)
+    DebugLog("Pressed F again to close info panel")
+    return false
+end
+
+-- Interact with generator: hold F, close info panel, then find real minigame
 local function interactWithGenerator(gen)
     if IsInteracting then return false end
     IsInteracting = true
     DebugLog("Interacting with generator: " .. gen.Name)
 
-    -- 1. Try ProximityPrompt
+    -- 1. Try ProximityPrompt:Prompt()
     local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
     if prompt then pcall(function() prompt:Prompt() end) end
     wait(0.5)
@@ -161,14 +191,14 @@ local function interactWithGenerator(gen)
     wait(HOLD_TIME)
     pcall(function() VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
 
-    -- 3. If info panel appeared, press F again (or click "OK" if exists)
+    -- 3. Check for info panel and close it
     local infoPanel = nil
-    for i = 1, 10 do
-        wait(0.2)
+    for i = 1, 20 do
+        wait(0.1)
         local playerGui = LP:FindFirstChild("PlayerGui")
         if playerGui then
             for _, gui in pairs(playerGui:GetDescendants()) do
-                if gui:IsA("Frame") and gui.Name:lower():find("setup") then
+                if gui:IsA("Frame") and gui.Visible and gui.Name:lower():find("setup") then
                     infoPanel = gui
                     break
                 end
@@ -177,26 +207,14 @@ local function interactWithGenerator(gen)
         if infoPanel then break end
     end
     if infoPanel then
-        DebugLog("Info panel detected – closing it")
-        -- Try to find a close button or just press F again
-        local closeBtn = nil
-        for _, btn in pairs(infoPanel:GetDescendants()) do
-            if btn:IsA("TextButton") and (btn.Text:lower():find("ok") or btn.Text:lower():find("close")) then
-                closeBtn = btn; break
-            end
-        end
-        if closeBtn then
-            local pos = closeBtn.AbsolutePosition + Vector2.new(closeBtn.AbsoluteSize.X/2, closeBtn.AbsoluteSize.Y/2)
-            pcall(function() VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0); wait(0.05); VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0) end)
-        else
-            pcall(function() VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game); wait(0.5); VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
-        end
+        DebugLog("Info panel detected – closing")
+        closeInfoPanel(infoPanel)
         wait(0.5)
     end
 
-    -- 4. Now wait for the real minigame to appear (up to 5 seconds)
+    -- 4. Now wait for the real minigame (up to 6 seconds)
     local realFrame = nil
-    for i = 1, 50 do
+    for i = 1, 60 do
         wait(0.1)
         realFrame = findRealMinigameFrame()
         if realFrame then break end
@@ -204,12 +222,12 @@ local function interactWithGenerator(gen)
 
     if realFrame then
         DebugLog("Real minigame opened – solving")
-        local solved = solveRealMinigame(realFrame)
+        local solved = clickAllElementsInFrame(realFrame)
         if solved then
             -- Wait for UI to close
             for i = 1, 40 do
                 wait(0.2)
-                if not findRealMinigameFrame() and not infoPanel then
+                if not findRealMinigameFrame() then
                     DebugLog("Generator completed!", "SUCCESS")
                     CompletedGenerators[gen] = true
                     IsInteracting = false
@@ -220,8 +238,8 @@ local function interactWithGenerator(gen)
             DebugLog("Minigame solver found no clickables", "ERROR")
         end
     else
-        DebugLog("Real minigame never appeared", "ERROR")
-        -- Fallback: click the generator part directly as a last resort
+        DebugLog("Real minigame never appeared after info panel", "ERROR")
+        -- Fallback: click the generator part directly
         local screenPos, onScreen = workspace.CurrentCamera:WorldToScreenPoint(gen.Position)
         if onScreen then
             pcall(function()
@@ -229,6 +247,7 @@ local function interactWithGenerator(gen)
                 wait(0.2)
                 VirtualInput:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, false, game, 0)
             end)
+            DebugLog("Clicked generator part as fallback")
         end
     end
 
@@ -301,7 +320,7 @@ local function aiTick()
                     if g == nearestGen then table.remove(Generators, i); break end
                 end
             end
-            wait(1)
+            wait(2) -- cooldown after interaction
         end
     end
 end
@@ -309,9 +328,9 @@ end
 -- Background loops
 spawn(function() while ScriptActive do wait(0.5); pcall(aiTick) end end)
 spawn(function() while ScriptActive do wait(0.5); if AIEnabled then pcall(applyStamina) end end end)
-spawn(function() while ScriptActive do wait(5); if AIEnabled then pcall(scanGenerators) end end end)
+spawn(function() while ScriptActive do wait(10); if AIEnabled then pcall(scanGenerators) end end end)
 
--- GUI (same as before, simplified)
+-- GUI (same as previous, included for completeness – I'll shorten for final answer)
 local function createHub()
     local sg = Instance.new("ScreenGui")
     sg.Name = "ForsakenAI_Final"
@@ -342,7 +361,6 @@ local function createHub()
     toggle.TextSize = 18
     toggle.Parent = frame
     Instance.new("UICorner").CornerRadius = UDim.new(0,8)
-
     local sliderFrame = Instance.new("Frame")
     sliderFrame.Size = UDim2.new(0,260,0,50)
     sliderFrame.Position = UDim2.new(0.5,-130,0,115)
@@ -519,4 +537,4 @@ end
 
 updateChar()
 createHub()
-DebugLog("Ultimate generator script loaded. Will attempt to close info panel and find real minigame.")
+DebugLog("Ultimate generator script loaded. Hold F for 4s, closes info panel, then solves real minigame.")
