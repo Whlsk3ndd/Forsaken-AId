@@ -1,28 +1,24 @@
 --[[
-    FORSAKEN AI - FINAL STABLE
-    + Forces sprint animation (Humanoid.Sprint = true)
-    + Prevents character freeze (throttled movement)
-    + Detailed generator interaction logs
-    + Rejoin button, cool GUI
+    FORSAKEN AI – ULTIMATE GENERATOR FIX
+    - Handles info panel, then forces real minigame
+    - Clicks ANY visible button inside the real minigame
+    - Throttled movement, rejoin, cool GUI
 --]]
 
--- // GETGENV SETTINGS //
 if getgenv then
     getgenv().LoadTime = getgenv().LoadTime or "3"
-    getgenv().GeneratorTime = getgenv().GeneratorTime or "2.5"
+    getgenv().GeneratorTime = getgenv().GeneratorTime or "3"
 end
-local loadTime = tonumber(getgenv and getgenv().LoadTime or 3) or 3
-if loadTime > 0 then wait(loadTime) end
+wait(tonumber(getgenv and getgenv().LoadTime or 3) or 3)
 
--- // SERVICES //
+-- Services
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local VirtualInput = game:GetService("VirtualInput")
 local TeleportService = game:GetService("TeleportService")
-local TweenService = game:GetService("TweenService")
 local LP = Players.LocalPlayer
 
--- // STATE //
+-- State
 local AIEnabled = false
 local ScriptActive = true
 local SliderValue = 40
@@ -32,49 +28,30 @@ local CompletedGenerators = {}
 local CurrentAction = "Idle"
 local IsInteracting = false
 local LastMoveTime = 0
-local HOLD_TIME = tonumber(getgenv and getgenv().GeneratorTime or 2.5) or 2.5
+local HOLD_TIME = tonumber(getgenv and getgenv().GeneratorTime or 3) or 3
 
--- // CONSTANTS //
+-- Constants
 local WALK_SPEED = 24
+local KILLER_NAMES = {"slasher","c00lkidd","john doe","1x1x1x1","noli","guest 666","nosferatu"}
 
--- // KILLER NAMES //
-local KILLER_NAMES = {
-    "slasher", "c00lkidd", "john doe", "1x1x1x1", "noli", "guest 666", "nosferatu",
-    "subject 0", "pursuer", "killer kyle", "stitchhare", "mafioso", "bluudud",
-    "divadayo", "gasharpoon", "annihilation", "aberrant", "admin romeo", "narrator"
-}
+local function DebugLog(msg) print("[AI] " .. msg) end
 
--- // SAFE PRINT //
-local function DebugLog(msg, level)
-    level = level or "INFO"
-    pcall(function() print(string.format("[%s] %s", level, msg)) end)
-end
-
--- // UPDATE CHARACTER + SPRINT ANIMATION //
 local function updateChar()
     pcall(function()
         PlayerChar = LP.Character
         if PlayerChar then
             Humanoid = PlayerChar:FindFirstChildOfClass("Humanoid")
             RootPart = PlayerChar:FindFirstChild("HumanoidRootPart")
-            if Humanoid then
-                -- Set walk speed and sprint animation
-                if Humanoid.WalkSpeed < WALK_SPEED then
-                    Humanoid.WalkSpeed = WALK_SPEED
-                end
-                Humanoid.Sprint = true
-                Humanoid:SetAttribute("Sprinting", true)
-                Humanoid:SetAttribute("Running", true)
+            if Humanoid and Humanoid.WalkSpeed < WALK_SPEED then
+                Humanoid.WalkSpeed = WALK_SPEED
             end
         end
     end)
 end
 
--- // KILLER DETECTION // --
 local function getNearestKiller()
     if not RootPart then return nil, math.huge end
-    local nearestObj = nil
-    local nearestDist = math.huge
+    local nearest, nearestDist = nil, math.huge
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= LP and plr.Character then
             local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
@@ -89,17 +66,15 @@ local function getNearestKiller()
                 if isKiller then
                     local dist = (RootPart.Position - hrp.Position).magnitude
                     if dist < nearestDist then
-                        nearestDist = dist
-                        nearestObj = hrp
+                        nearestDist, nearest = dist, hrp
                     end
                 end
             end
         end
     end
-    return nearestObj, nearestDist
+    return nearest, nearestDist
 end
 
--- // GENERATOR SCANNING // --
 local function scanGenerators()
     local newGens = {}
     pcall(function()
@@ -121,179 +96,147 @@ local function scanGenerators()
     return #Generators
 end
 
--- // MOUSE DRAG (for minigame) // --
-local function dragMouse(fromPos, toPos)
-    pcall(function()
-        VirtualInput:SendMouseButtonEvent(fromPos.X, fromPos.Y, 0, true, game, 0)
-        wait(0.05)
-        for t = 0, 1, 0.1 do
-            local x = fromPos.X + (toPos.X - fromPos.X) * t
-            local y = fromPos.Y + (toPos.Y - fromPos.Y) * t
-            VirtualInput:SendMouseMoveEvent(x, y, game, 0)
-            wait(0.02)
+-- REAL MINIGAME DETECTION (look for frames that contain numbered buttons)
+local function findRealMinigameFrame()
+    local playerGui = LP:FindFirstChild("PlayerGui")
+    if not playerGui then return nil end
+    for _, gui in pairs(playerGui:GetDescendants()) do
+        if gui:IsA("Frame") and gui.Visible then
+            for _, child in pairs(gui:GetDescendants()) do
+                if child:IsA("TextButton") or child:IsA("ImageButton") or child:IsA("TextLabel") then
+                    if tonumber(child.Text) or child.Name:match("%d+") then
+                        DebugLog("Real minigame frame found: " .. gui.Name)
+                        return gui
+                    end
+                end
+            end
         end
-        VirtualInput:SendMouseButtonEvent(toPos.X, toPos.Y, 0, false, game, 0)
-    end)
+    end
+    return nil
 end
 
--- // MINIGAME SOLVER (with drag) // --
-local function solveMinigame()
-    local playerGui = LP:FindFirstChild("PlayerGui")
-    if not playerGui then DebugLog("No PlayerGui found", "ERROR"); return false end
-    local minigameFrame = nil
-    for _, gui in pairs(playerGui:GetDescendants()) do
-        if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-            minigameFrame = gui
-            break
-        end
-    end
-    if not minigameFrame then DebugLog("Minigame frame not found", "ERROR"); return false end
-    DebugLog("Minigame frame found: " .. minigameFrame.Name)
-
-    -- Find all numbered dots (TextLabel, TextButton, ImageLabel with numbers)
-    local dots = {}
-    for _, child in pairs(minigameFrame:GetDescendants()) do
-        if child.Visible then
-            local num = nil
-            if child:IsA("TextLabel") or child:IsA("TextButton") then
-                num = tonumber(child.Text)
-            elseif child:IsA("ImageLabel") then
-                num = tonumber(child.Name:match("%d+"))
-            end
-            if num then
-                table.insert(dots, {
-                    obj = child,
-                    number = num,
-                    color = child.BackgroundColor3,
-                    pos = child.AbsolutePosition + Vector2.new(child.AbsoluteSize.X/2, child.AbsoluteSize.Y/2)
-                })
+-- BRUTE-FORCE SOLVER FOR REAL MINIGAME
+local function solveRealMinigame(frame)
+    local clickables = {}
+    for _, child in pairs(frame:GetDescendants()) do
+        if child.Visible and (child:IsA("ImageButton") or child:IsA("TextButton") or child:IsA("TextLabel")) then
+            if child.AbsoluteSize.X > 10 and child.AbsoluteSize.Y > 10 then
+                table.insert(clickables, child)
             end
         end
     end
-    DebugLog("Found " .. #dots .. " numbered dots")
-
-    if #dots < 2 then
-        -- Fallback: click all buttons (ImageButton/TextButton) in order
-        local buttons = {}
-        for _, child in pairs(minigameFrame:GetDescendants()) do
-            if (child:IsA("ImageButton") or child:IsA("TextButton")) and child.Visible then
-                table.insert(buttons, child)
-            end
+    if #clickables == 0 then return false end
+    table.sort(clickables, function(a,b)
+        if math.abs(a.AbsolutePosition.Y - b.AbsolutePosition.Y) < 50 then
+            return a.AbsolutePosition.X < b.AbsolutePosition.X
+        else
+            return a.AbsolutePosition.Y < b.AbsolutePosition.Y
         end
-        DebugLog("Fallback: found " .. #buttons .. " buttons")
-        if #buttons < 2 then return false end
-        table.sort(buttons, function(a,b)
-            if math.abs(a.AbsolutePosition.Y - b.AbsolutePosition.Y) < 50 then
-                return a.AbsolutePosition.X < b.AbsolutePosition.X
-            else
-                return a.AbsolutePosition.Y < b.AbsolutePosition.Y
-            end
+    end)
+    for _, btn in ipairs(clickables) do
+        local pos = btn.AbsolutePosition + Vector2.new(btn.AbsoluteSize.X/2, btn.AbsoluteSize.Y/2)
+        pcall(function()
+            VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+            wait(0.05)
+            VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
         end)
-        for _, btn in ipairs(buttons) do
-            local pos = btn.AbsolutePosition + Vector2.new(btn.AbsoluteSize.X/2, btn.AbsoluteSize.Y/2)
-            pcall(function()
-                VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
-                wait(0.05)
-                VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-            end)
-            wait(0.1)
-        end
-        return true
-    end
-
-    -- Group by color, then sort by number, then drag connect
-    local colorGroups = {}
-    for _, dot in pairs(dots) do
-        local key = tostring(dot.color)
-        if not colorGroups[key] then colorGroups[key] = {} end
-        table.insert(colorGroups[key], dot)
-    end
-
-    for _, group in pairs(colorGroups) do
-        table.sort(group, function(a,b) return a.number < b.number end)
-        for i = 1, #group - 1 do
-            local start = group[i]
-            local target = group[i+1]
-            if start.number == target.number then
-                dragMouse(start.pos, target.pos)
-                wait(0.2)
-            end
-        end
+        wait(0.1)
     end
     return true
 end
 
--- // INTERACT WITH GENERATOR // --
+-- INTERACT WITH GENERATOR (handles info panel)
 local function interactWithGenerator(gen)
     if IsInteracting then return false end
     IsInteracting = true
     DebugLog("Interacting with generator: " .. gen.Name)
 
-    -- Method 1: ProximityPrompt:Prompt()
+    -- 1. Try ProximityPrompt
     local prompt = gen:FindFirstChildWhichIsA("ProximityPrompt")
-    if prompt then
-        pcall(function() prompt:Prompt() end)
-        wait(0.5)
-    end
+    if prompt then pcall(function() prompt:Prompt() end) end
+    wait(0.5)
 
-    -- Method 2: Hold F key
+    -- 2. Hold F for HOLD_TIME seconds
     pcall(function() VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game) end)
     wait(HOLD_TIME)
     pcall(function() VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
 
-    -- Check for minigame UI
-    local uiOpened = false
-    for i = 1, 20 do
-        wait(0.1)
+    -- 3. If info panel appeared, press F again (or click "OK" if exists)
+    local infoPanel = nil
+    for i = 1, 10 do
+        wait(0.2)
         local playerGui = LP:FindFirstChild("PlayerGui")
         if playerGui then
             for _, gui in pairs(playerGui:GetDescendants()) do
-                if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                    uiOpened = true
+                if gui:IsA("Frame") and gui.Name:lower():find("setup") then
+                    infoPanel = gui
                     break
                 end
             end
         end
-        if uiOpened then break end
+        if infoPanel then break end
+    end
+    if infoPanel then
+        DebugLog("Info panel detected – closing it")
+        -- Try to find a close button or just press F again
+        local closeBtn = nil
+        for _, btn in pairs(infoPanel:GetDescendants()) do
+            if btn:IsA("TextButton") and (btn.Text:lower():find("ok") or btn.Text:lower():find("close")) then
+                closeBtn = btn; break
+            end
+        end
+        if closeBtn then
+            local pos = closeBtn.AbsolutePosition + Vector2.new(closeBtn.AbsoluteSize.X/2, closeBtn.AbsoluteSize.Y/2)
+            pcall(function() VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0); wait(0.05); VirtualInput:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0) end)
+        else
+            pcall(function() VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game); wait(0.5); VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
+        end
+        wait(0.5)
     end
 
-    if uiOpened then
-        DebugLog("Minigame UI opened – solving")
-        local solved = solveMinigame()
+    -- 4. Now wait for the real minigame to appear (up to 5 seconds)
+    local realFrame = nil
+    for i = 1, 50 do
+        wait(0.1)
+        realFrame = findRealMinigameFrame()
+        if realFrame then break end
+    end
+
+    if realFrame then
+        DebugLog("Real minigame opened – solving")
+        local solved = solveRealMinigame(realFrame)
         if solved then
             -- Wait for UI to close
-            for i = 1, 30 do
-                wait(0.3)
-                local stillOpen = false
-                local playerGui = LP:FindFirstChild("PlayerGui")
-                if playerGui then
-                    for _, gui in pairs(playerGui:GetDescendants()) do
-                        if gui:IsA("Frame") and (gui.Name:lower():find("repair") or gui.Name:lower():find("generator")) then
-                            stillOpen = true
-                            break
-                        end
-                    end
-                end
-                if not stillOpen then
+            for i = 1, 40 do
+                wait(0.2)
+                if not findRealMinigameFrame() and not infoPanel then
                     DebugLog("Generator completed!", "SUCCESS")
                     CompletedGenerators[gen] = true
                     IsInteracting = false
                     return true
                 end
             end
-            DebugLog("Minigame UI did not close after solving", "WARN")
         else
-            DebugLog("Minigame solver failed (no clickables or drag failed)", "ERROR")
+            DebugLog("Minigame solver found no clickables", "ERROR")
         end
     else
-        DebugLog("Minigame UI did not open after F key hold", "ERROR")
+        DebugLog("Real minigame never appeared", "ERROR")
+        -- Fallback: click the generator part directly as a last resort
+        local screenPos, onScreen = workspace.CurrentCamera:WorldToScreenPoint(gen.Position)
+        if onScreen then
+            pcall(function()
+                VirtualInput:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, true, game, 0)
+                wait(0.2)
+                VirtualInput:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, false, game, 0)
+            end)
+        end
     end
 
     IsInteracting = false
     return false
 end
 
--- // MOVEMENT (throttled to prevent freeze) // --
+-- Movement and AI loops (throttled)
 local function moveToGenerator(gen)
     if not RootPart or not Humanoid then return end
     local now = tick()
@@ -302,7 +245,6 @@ local function moveToGenerator(gen)
     Humanoid:MoveTo(gen.Position)
 end
 
--- // FLEE // --
 local function fleeFromKiller(killerPos)
     if not RootPart or not Humanoid then return end
     local direction = (RootPart.Position - killerPos).unit
@@ -311,31 +253,22 @@ local function fleeFromKiller(killerPos)
     Humanoid:MoveTo(fleePos)
 end
 
--- // INFINITE STAMINA (with sprint animation) // --
 local function applyStamina()
     if not Humanoid then return end
     if Humanoid.WalkSpeed < WALK_SPEED then
         Humanoid.WalkSpeed = WALK_SPEED
     end
-    Humanoid.Sprint = true
-    pcall(function()
-        Humanoid:SetAttribute("Sprinting", true)
-        Humanoid:SetAttribute("Running", true)
-    end)
     for _, effect in pairs(game:GetService("Lighting"):GetChildren()) do
         if effect:IsA("BlurEffect") then effect.Enabled = false end
     end
 end
 
--- // MAIN AI LOOP // --
 local function aiTick()
     if not AIEnabled then return end
     if not PlayerChar or not Humanoid or not RootPart then
         updateChar()
         return
     end
-
-    -- Killer avoidance
     local killerObj, killerDist = getNearestKiller()
     if killerObj and killerDist <= SliderValue then
         CurrentAction = "Fleeing"
@@ -343,25 +276,19 @@ local function aiTick()
         wait(0.5)
         return
     end
-
-    -- Generator farming
     if #Generators == 0 then
         scanGenerators()
         return
     end
-
-    local nearestGen = nil
-    local nearestDist = math.huge
+    local nearestGen, nearestDist = nil, math.huge
     for _, gen in pairs(Generators) do
         if gen and gen.Parent then
             local d = (RootPart.Position - gen.Position).magnitude
             if d < nearestDist then
-                nearestDist = d
-                nearestGen = gen
+                nearestDist, nearestGen = d, gen
             end
         end
     end
-
     if nearestGen then
         if nearestDist > 5 then
             CurrentAction = "Moving to generator"
@@ -379,201 +306,162 @@ local function aiTick()
     end
 end
 
--- // BACKGROUND LOOPS (with pcall for safety) // --
-spawn(function()
-    while ScriptActive do
-        wait(0.5)
-        pcall(aiTick)
-    end
-end)
+-- Background loops
+spawn(function() while ScriptActive do wait(0.5); pcall(aiTick) end end)
+spawn(function() while ScriptActive do wait(0.5); if AIEnabled then pcall(applyStamina) end end end)
+spawn(function() while ScriptActive do wait(5); if AIEnabled then pcall(scanGenerators) end end end)
 
-spawn(function()
-    while ScriptActive do
-        wait(0.5)
-        if AIEnabled then pcall(applyStamina) end
-    end
-end)
-
-spawn(function()
-    while ScriptActive do
-        wait(5)
-        if AIEnabled then pcall(scanGenerators) end
-    end
-end)
-
--- // COOL GUI // --
+-- GUI (same as before, simplified)
 local function createHub()
     local sg = Instance.new("ScreenGui")
     sg.Name = "ForsakenAI_Final"
     sg.Parent = game.CoreGui
     sg.ResetOnSpawn = false
-
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(0, 330, 0, 290)
     frame.Position = UDim2.new(0.5, -165, 0.5, -145)
-    frame.BackgroundColor3 = Color3.fromRGB(5, 5, 20)
+    frame.BackgroundColor3 = Color3.fromRGB(5,5,20)
     frame.BackgroundTransparency = 0.1
-    frame.BorderSizePixel = 0
     frame.Parent = sg
-    Instance.new("UICorner").CornerRadius = UDim.new(0, 14)
-    local glow = Instance.new("UIStroke")
-    glow.Color = Color3.fromRGB(0, 255, 200)
-    glow.Thickness = 2
-    glow.Transparency = 0.3
-    glow.Parent = frame
-
+    Instance.new("UICorner").CornerRadius = UDim.new(0,14)
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, 0, 0, 40)
+    title.Size = UDim2.new(1,0,0,40)
     title.BackgroundTransparency = 1
     title.Text = "⚡ FORSAKEN AI ⚡"
-    title.TextColor3 = Color3.fromRGB(0, 255, 200)
+    title.TextColor3 = Color3.fromRGB(0,255,200)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 18
     title.Parent = frame
-
     local toggle = Instance.new("TextButton")
-    toggle.Size = UDim2.new(0, 200, 0, 45)
-    toggle.Position = UDim2.new(0.5, -100, 0, 55)
-    toggle.BackgroundColor3 = Color3.fromRGB(0, 100, 180)
+    toggle.Size = UDim2.new(0,200,0,45)
+    toggle.Position = UDim2.new(0.5,-100,0,55)
+    toggle.BackgroundColor3 = Color3.fromRGB(0,100,180)
     toggle.Text = "🔴 AI OFF"
-    toggle.TextColor3 = Color3.new(1, 1, 1)
+    toggle.TextColor3 = Color3.new(1,1,1)
     toggle.Font = Enum.Font.GothamBold
     toggle.TextSize = 18
     toggle.Parent = frame
-    Instance.new("UICorner").CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner").CornerRadius = UDim.new(0,8)
 
-    -- Slider
     local sliderFrame = Instance.new("Frame")
-    sliderFrame.Size = UDim2.new(0, 260, 0, 50)
-    sliderFrame.Position = UDim2.new(0.5, -130, 0, 115)
+    sliderFrame.Size = UDim2.new(0,260,0,50)
+    sliderFrame.Position = UDim2.new(0.5,-130,0,115)
     sliderFrame.BackgroundTransparency = 1
     sliderFrame.Parent = frame
-
     local sliderLabel = Instance.new("TextLabel")
-    sliderLabel.Size = UDim2.new(0, 140, 0, 20)
-    sliderLabel.Position = UDim2.new(0, 0, 0, 0)
+    sliderLabel.Size = UDim2.new(0,140,0,20)
+    sliderLabel.Position = UDim2.new(0,0,0,0)
     sliderLabel.BackgroundTransparency = 1
     sliderLabel.Text = "Killer Alert: 40"
-    sliderLabel.TextColor3 = Color3.fromRGB(255, 180, 180)
+    sliderLabel.TextColor3 = Color3.fromRGB(255,180,180)
     sliderLabel.Font = Enum.Font.Gotham
     sliderLabel.TextSize = 12
     sliderLabel.Parent = sliderFrame
-
     local sliderBg = Instance.new("Frame")
-    sliderBg.Size = UDim2.new(0, 200, 0, 6)
-    sliderBg.Position = UDim2.new(0, 0, 0, 22)
-    sliderBg.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    sliderBg.Size = UDim2.new(0,200,0,6)
+    sliderBg.Position = UDim2.new(0,0,0,22)
+    sliderBg.BackgroundColor3 = Color3.fromRGB(50,50,70)
     sliderBg.BorderSizePixel = 0
     sliderBg.Parent = sliderFrame
     local fill = Instance.new("Frame")
-    fill.Size = UDim2.new(0.4, 0, 1, 0)
-    fill.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+    fill.Size = UDim2.new(0.4,0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(0,200,255)
     fill.BorderSizePixel = 0
     fill.Parent = sliderBg
     local knob = Instance.new("TextButton")
-    knob.Size = UDim2.new(0, 14, 0, 14)
-    knob.Position = UDim2.new(0.4, -7, 0, -4)
-    knob.BackgroundColor3 = Color3.new(1, 1, 1)
+    knob.Size = UDim2.new(0,14,0,14)
+    knob.Position = UDim2.new(0.4,-7,0,-4)
+    knob.BackgroundColor3 = Color3.new(1,1,1)
     knob.Text = ""
     knob.AutoButtonColor = false
     knob.Parent = sliderFrame
-    Instance.new("UICorner").CornerRadius = UDim.new(1, 0)
-
+    Instance.new("UICorner").CornerRadius = UDim.new(1,0)
     local function setSlider(val)
-        val = math.clamp(val, 0, 100)
+        val = math.clamp(val,0,100)
         SliderValue = val
-        fill.Size = UDim2.new(val / 100, 0, 1, 0)
-        knob.Position = UDim2.new(val / 100, -7, 0, -4)
+        fill.Size = UDim2.new(val/100,0,1,0)
+        knob.Position = UDim2.new(val/100,-7,0,-4)
         sliderLabel.Text = "Killer Alert: " .. math.floor(val)
     end
     setSlider(40)
-
     knob.InputBegan:Connect(function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 then
             local move, rel
             move = UserInputService.InputChanged:Connect(function(io)
                 if io.UserInputType == Enum.UserInputType.MouseMovement then
                     local x = math.clamp(io.Position.X - sliderBg.AbsolutePosition.X, 0, sliderBg.AbsoluteSize.X)
-                    setSlider(math.floor((x / sliderBg.AbsoluteSize.X) * 100))
+                    setSlider(math.floor((x/sliderBg.AbsoluteSize.X)*100))
                 end
             end)
             rel = UserInputService.InputEnded:Connect(function(io)
-                if io.UserInputType == Enum.UserInputType.MouseButton1 then
-                    move:Disconnect(); rel:Disconnect()
-                end
+                if io.UserInputType == Enum.UserInputType.MouseButton1 then move:Disconnect(); rel:Disconnect() end
             end)
         end
     end)
-
     local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -20, 0, 35)
-    status.Position = UDim2.new(0, 10, 0, 180)
+    status.Size = UDim2.new(1,-20,0,35)
+    status.Position = UDim2.new(0,10,0,180)
     status.BackgroundTransparency = 1
     status.Text = "Ready"
-    status.TextColor3 = Color3.fromRGB(200, 200, 230)
+    status.TextColor3 = Color3.fromRGB(200,200,230)
     status.Font = Enum.Font.Gotham
     status.TextSize = 12
     status.TextXAlignment = Enum.TextXAlignment.Left
     status.Parent = frame
-
     local actionLabel = Instance.new("TextLabel")
-    actionLabel.Size = UDim2.new(1, -20, 0, 20)
-    actionLabel.Position = UDim2.new(0, 10, 0, 215)
+    actionLabel.Size = UDim2.new(1,-20,0,20)
+    actionLabel.Position = UDim2.new(0,10,0,215)
     actionLabel.BackgroundTransparency = 1
     actionLabel.Text = "Action: Idle"
-    actionLabel.TextColor3 = Color3.fromRGB(150, 150, 200)
+    actionLabel.TextColor3 = Color3.fromRGB(150,150,200)
     actionLabel.Font = Enum.Font.Gotham
     actionLabel.TextSize = 11
     actionLabel.TextXAlignment = Enum.TextXAlignment.Left
     actionLabel.Parent = frame
-
     local hideBtn = Instance.new("TextButton")
-    hideBtn.Size = UDim2.new(0, 90, 0, 35)
-    hideBtn.Position = UDim2.new(0.05, 0, 0, 245)
-    hideBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 90)
+    hideBtn.Size = UDim2.new(0,90,0,35)
+    hideBtn.Position = UDim2.new(0.05,0,0,245)
+    hideBtn.BackgroundColor3 = Color3.fromRGB(60,60,90)
     hideBtn.Text = "⛔ HIDE"
-    hideBtn.TextColor3 = Color3.new(1, 1, 1)
+    hideBtn.TextColor3 = Color3.new(1,1,1)
     hideBtn.Font = Enum.Font.GothamBold
     hideBtn.TextSize = 13
     hideBtn.Parent = frame
-    Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
-
+    Instance.new("UICorner").CornerRadius = UDim.new(0,6)
     local rejoinBtn = Instance.new("TextButton")
-    rejoinBtn.Size = UDim2.new(0, 90, 0, 35)
-    rejoinBtn.Position = UDim2.new(0.35, 0, 0, 245)
-    rejoinBtn.BackgroundColor3 = Color3.fromRGB(100, 70, 120)
+    rejoinBtn.Size = UDim2.new(0,90,0,35)
+    rejoinBtn.Position = UDim2.new(0.35,0,0,245)
+    rejoinBtn.BackgroundColor3 = Color3.fromRGB(100,70,120)
     rejoinBtn.Text = "🔄 REJOIN"
-    rejoinBtn.TextColor3 = Color3.new(1, 1, 1)
+    rejoinBtn.TextColor3 = Color3.new(1,1,1)
     rejoinBtn.Font = Enum.Font.GothamBold
     rejoinBtn.TextSize = 13
     rejoinBtn.Parent = frame
-    Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
-
+    Instance.new("UICorner").CornerRadius = UDim.new(0,6)
     local closeBtn = Instance.new("TextButton")
-    closeBtn.Size = UDim2.new(0, 90, 0, 35)
-    closeBtn.Position = UDim2.new(0.65, 0, 0, 245)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 70)
+    closeBtn.Size = UDim2.new(0,90,0,35)
+    closeBtn.Position = UDim2.new(0.65,0,0,245)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180,50,70)
     closeBtn.Text = "❌ CLOSE"
-    closeBtn.TextColor3 = Color3.new(1, 1, 1)
+    closeBtn.TextColor3 = Color3.new(1,1,1)
     closeBtn.Font = Enum.Font.GothamBold
     closeBtn.TextSize = 13
     closeBtn.Parent = frame
-    Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
-
+    Instance.new("UICorner").CornerRadius = UDim.new(0,6)
     local showBtn = nil
     hideBtn.MouseButton1Click:Connect(function()
         frame.Visible = false
         if not showBtn then
             showBtn = Instance.new("TextButton")
-            showBtn.Size = UDim2.new(0, 90, 0, 30)
-            showBtn.Position = UDim2.new(0.02, 0, 0.9, 0)
-            showBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 200)
+            showBtn.Size = UDim2.new(0,90,0,30)
+            showBtn.Position = UDim2.new(0.02,0,0.9,0)
+            showBtn.BackgroundColor3 = Color3.fromRGB(0,180,200)
             showBtn.Text = "🔽 SHOW"
-            showBtn.TextColor3 = Color3.new(1, 1, 1)
+            showBtn.TextColor3 = Color3.new(1,1,1)
             showBtn.Font = Enum.Font.GothamBold
             showBtn.TextSize = 12
             showBtn.Parent = sg
-            Instance.new("UICorner").CornerRadius = UDim.new(0, 8)
+            Instance.new("UICorner").CornerRadius = UDim.new(0,8)
             showBtn.MouseButton1Click:Connect(function()
                 frame.Visible = true
                 showBtn:Destroy()
@@ -581,35 +469,25 @@ local function createHub()
             end)
         end
     end)
-
     rejoinBtn.MouseButton1Click:Connect(function()
         TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP)
     end)
-
     closeBtn.MouseButton1Click:Connect(function()
-        AIEnabled = false
-        ScriptActive = false
-        sg:Destroy()
-        DebugLog("Script closed")
+        AIEnabled = false; ScriptActive = false; sg:Destroy()
     end)
-
     toggle.MouseButton1Click:Connect(function()
         AIEnabled = not AIEnabled
         if AIEnabled then
             toggle.Text = "🟢 AI ON"
-            toggle.BackgroundColor3 = Color3.fromRGB(0, 180, 80)
-            updateChar()
-            scanGenerators()
+            toggle.BackgroundColor3 = Color3.fromRGB(0,180,80)
+            updateChar(); scanGenerators()
             status.Text = "AI ACTIVE"
-            DebugLog("AI enabled")
         else
             toggle.Text = "🔴 AI OFF"
-            toggle.BackgroundColor3 = Color3.fromRGB(0, 100, 180)
+            toggle.BackgroundColor3 = Color3.fromRGB(0,100,180)
             status.Text = "AI OFF"
-            DebugLog("AI disabled")
         end
     end)
-
     spawn(function()
         while ScriptActive and sg do
             wait(1)
@@ -620,8 +498,6 @@ local function createHub()
             end
         end
     end)
-
-    -- Draggable title
     local dragStart, dragPos, dragging = nil
     title.InputBegan:Connect(function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -641,7 +517,6 @@ local function createHub()
     end)
 end
 
--- // START // --
 updateChar()
 createHub()
-DebugLog("Final AI loaded with sprint animation. Use GUI to toggle. Console spam from ActorNetwork is game bug, ignore.")
+DebugLog("Ultimate generator script loaded. Will attempt to close info panel and find real minigame.")
